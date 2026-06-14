@@ -1,0 +1,18 @@
+# Virtual environment
+jarvis-env/
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# TTS model files (download separately)
+kokoro-v1.0.int8.onnx
+kokoro-v1.0.onnx
+voices-v1.0.bin
+
+# GeoIP database (download separately from MaxMind)
+data/GeoLite2-City.mmdb
+
+# OS junk
+Thumbs.db
+.DS_Store

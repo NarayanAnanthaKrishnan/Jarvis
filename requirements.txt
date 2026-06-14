@@ -1,0 +1,10 @@
+faster-whisper
+sounddevice
+numpy
+scipy
+keyboard
+ollama
+kokoro-onnx
+pyautogui
+ddgs
+geoip2
