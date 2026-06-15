@@ -128,6 +128,21 @@ User Input
 - `search_web(query, num_results=5)` — uses `ddgs.DDGS`, returns formatted list of title/body/URL
 - Returns string with newline-separated entries
 
+#### `tools/datetime_tool.py`
+- `get_datetime()` — returns current date/time as natural string like `"Monday, June 15 2026, 10:34 AM"`
+- No parameters, no external dependencies
+
+#### `tools/calculator.py`
+- `calculate(expression)` — safely evaluates math expressions using `ast` module node whitelist
+- Only allows basic arithmetic operators. Returns result string or error message.
+- No external dependencies
+
+#### `tools/app_launcher.py`
+- `open_app(app_name)` — launches a Windows application via `subprocess.Popen()`
+- Maintains `APP_REGISTRY` dict mapping names to executable paths
+- Resolves `%USERNAME%` via `os.environ`
+
+
 #### `agent/planner.py`
 - `create_plan(user_input, llm) -> dict` — intent router + planner
 - Uses a dedicated system prompt to classify user intent as `"chat"` or `"tool_request"`

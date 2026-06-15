@@ -1,6 +1,9 @@
 from tools.web_search import search_web
 from tools.geoip import get_city_info
 from tools.weather import get_weather
+from tools.datetime_tool import get_datetime
+from tools.calculator import calculate
+from tools.app_launcher import open_app
 
 
 TOOL_DEFINITIONS = [
@@ -53,13 +56,61 @@ TOOL_DEFINITIONS = [
                 "required": ["city"]
             }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_datetime",
+            "description": "Get the current date and time",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "Safely evaluate a mathematical expression",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "The math expression to evaluate, e.g. '(2 + 3) * 4'"
+                    }
+                },
+                "required": ["expression"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": "Launch a desktop application on Windows",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "Name of the app to open (chrome, vscode, notepad, explorer, spotify, terminal, cmd, calculator, brave)"
+                    }
+                },
+                "required": ["app_name"]
+            }
+        }
+    },
 ]
 
 TOOL_MAP = {
     "search_web": search_web,
     "get_city_info": get_city_info,
-    "get_weather": get_weather
+    "get_weather": get_weather,
+    "get_datetime": get_datetime,
+    "calculate": calculate,
+    "open_app": open_app
 }
 
 

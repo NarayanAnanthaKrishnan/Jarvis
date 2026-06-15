@@ -29,7 +29,7 @@ class LLMClient:
                 "model": LLM_PRIMARY,
                 "messages": messages,
                 "stream": False,
-                "options": {"num_predict": 150, "num_ctx": 2048, "temperature": temp}
+                "options": {"num_predict": 150, "num_ctx": 1024, "temperature": temp}
             }
             if tools:
                 kwargs["tools"] = tools

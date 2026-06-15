@@ -9,7 +9,7 @@ Rules:
 - Never say "according to the data" or "the tool returned" or "the results show".
 - For weather: "In [location] it's [condition], [temperature] with [wind]."
 - For search: "I found that [key fact]."
-- If there's an error: "Sorry, I couldn't find that."
+- If the data doesn't fully answer the question, report what you found anyway.
 - JUST THE ANSWER. Nothing else.
 
 User question: {USER_INPUT}
@@ -34,7 +34,7 @@ def summarize(user_input: str, tool_results: list[dict], llm: LLMClient) -> str:
     prompt = SUMMARIZER_PROMPT.replace("{USER_INPUT}", user_input).replace("{TOOL_RESULTS}", formatted)
 
     messages = [
-        {"role": "system", "content": "You produce concise spoken responses. Use exact numbers."},
+        {"role": "system", "content": "You produce concise spoken responses from tool data. Use exact numbers. Never say you couldn't find something if data exists — report what was found."},
         {"role": "user", "content": prompt}
     ]
 

@@ -5,6 +5,9 @@ TOOL_DESCRIPTIONS = """
 - search_web(query): Search the web for current information, news, facts
 - get_city_info(ip): Look up city and region from IP address (use "auto" for current location)
 - get_weather(city): Get current weather conditions for a city
+- get_datetime(): Get the current date and time
+- calculate(expression): Safely evaluate a math expression, e.g. calculate("(2+3)*4")
+- open_app(app_name): Launch a desktop application (chrome, vscode, notepad, explorer, spotify, terminal, cmd, calculator, brave)
 """
 
 PLANNER_PROMPT = """You are Jarvis's intent router. Analyze the user's request and create a plan.
@@ -17,6 +20,7 @@ Rules:
 - If the user needs information, output "tool_request" intent with a plan.
 - For weather: if a city is named, use get_weather directly. If no city mentioned, use get_city_info first.
 - For general knowledge, news, facts: use search_web.
+- Only include tools DIRECTLY needed. Do NOT include get_city_info unless the query needs location context (weather, local info, "near me").
 - Output ONLY valid JSON. No markdown, no code blocks, no backticks, no formatting.
 
 Output format for chat:
@@ -36,7 +40,16 @@ User: what is the weather like here
 Assistant: {"intent": "tool_request", "plan": [{"tool": "get_weather", "args": {"city": "auto"}}], "message": ""}
 
 User: search for AI news
-Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "AI news 2026"}}], "message": ""}"""
+Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "AI news 2026"}}], "message": ""}
+
+User: what time is it
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": ""}
+
+User: what is the date
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": ""}
+
+User: calculate 15 percent of 200
+Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": ""}"""
 
 
 def _extract_json(text: str) -> str:
@@ -48,6 +61,16 @@ def _extract_json(text: str) -> str:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines).strip()
+    brace = text.find("{")
+    if brace >= 0:
+        depth = 0
+        for i in range(brace, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[brace:i+1]
     return text
 
 
