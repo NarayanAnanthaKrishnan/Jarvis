@@ -4,6 +4,12 @@ from tools.weather import get_weather
 from tools.datetime_tool import get_datetime
 from tools.calculator import calculate
 from tools.app_launcher import open_app
+from tools.notes import take_note, read_notes
+from tools.system_info import get_system_info
+from tools.browser import open_url
+from tools.clipboard_tool import read_clipboard
+from tools.news import get_news
+from tools.media import media_control
 
 
 TOOL_DEFINITIONS = [
@@ -102,6 +108,92 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_note",
+            "description": "Save a note or reminder to the user's notes file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string", "description": "The note content to save"}
+                },
+                "required": ["note"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_notes",
+            "description": "Read the user's saved notes.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "last_n": {"type": "integer", "description": "Number of recent notes to return. Default 5."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_info",
+            "description": "Get current CPU usage, RAM usage, and disk space on this Windows machine.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_url",
+            "description": "Open a URL or named bookmark in the browser. Use for GitHub, Gmail, YouTube, or any website.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL or bookmark name like 'github', 'youtube', 'gmail'"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_clipboard",
+            "description": "Read the current contents of the user's clipboard.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_news",
+            "description": "Fetch top news headlines. Topics: general, tech, science, us.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string", "description": "News topic: general, tech, science, or us. Default general."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "media_control",
+            "description": "Control media playback. Actions: play, pause, next, previous, volume up, volume down, mute.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "description": "Media action: play, pause, next, previous, volume up, volume down, mute"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
 ]
 
 TOOL_MAP = {
@@ -110,7 +202,14 @@ TOOL_MAP = {
     "get_weather": get_weather,
     "get_datetime": get_datetime,
     "calculate": calculate,
-    "open_app": open_app
+    "open_app": open_app,
+    "take_note": take_note,
+    "read_notes": read_notes,
+    "get_system_info": get_system_info,
+    "open_url": open_url,
+    "read_clipboard": read_clipboard,
+    "get_news": get_news,
+    "media_control": media_control,
 }
 
 

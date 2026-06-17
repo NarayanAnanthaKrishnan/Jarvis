@@ -142,6 +142,28 @@ User Input
 - Maintains `APP_REGISTRY` dict mapping names to executable paths
 - Resolves `%USERNAME%` via `os.environ`
 
+#### `tools/notes.py`
+- `take_note(note)` — appends timestamped note to `notes.txt` in project root
+- `read_notes(last_n=5)` — reads last N notes, returns numbered list
+
+#### `tools/system_info.py`
+- `get_system_info()` — uses `psutil` to return CPU%, RAM used/total, Disk C: usage
+- Returns a single readable string
+
+#### `tools/browser.py`
+- `open_url(url)` — opens a URL or named bookmark (github, gmail, youtube, etc.) in the browser
+- Normalizes URL, checks `BOOKMARK_REGISTRY` first
+
+#### `tools/clipboard_tool.py`
+- `read_clipboard()` — uses `pyperclip.paste()`, returns clipboard content (truncated at 500 chars)
+
+#### `tools/news.py`
+- `get_news(topic="general")` — fetches top 5 RSS headlines. Topics: general, tech, science, us.
+- Uses `feedparser`, no API key needed
+
+#### `tools/media.py`
+- `media_control(action)` — simulates media key presses via `keyboard.send()`
+- Actions: play, pause, next, previous, volume up, volume down, mute
 
 #### `agent/planner.py`
 - `create_plan(user_input, llm) -> dict` — intent router + planner
@@ -175,6 +197,23 @@ User Input
   3. If intent is "tool_request": `agent.executor.execute_plan(steps)` → results
   4. `agent.summarizer.summarize(text, results, llm)` → clean speech
   5. Falls back to `llm.chat()` if plan has no steps
+
+#### `modes/ultra.py`
+- Class: `UltraMode`
+- `__init__(recorder, transcriber, llm)` — stores shared instances
+- `on_activate()` — starts recording
+- `on_release()` — stops recording, runs the full pipeline:
+  1. Screenshot + OCR via `tools.screen_ocr.capture_and_ocr()`
+  2. STT via `transcriber.transcribe()`
+  3. Optional company search via `tools.web_search.search_web()`
+  4. LLM generation using `ULTRA_SYSTEM_PROMPT` with screen context + user instruction
+  5. Copy to clipboard + paste at cursor via `pyperclip` + `pyautogui`
+- Press CTRL+SHIFT+U, speak your request, release → generated content appears at cursor
+- Works for emails, cover letters, code, summaries, documents — any writing task
+
+#### `tools/screen_ocr.py`
+- `capture_and_ocr()` — takes full screenshot via `pyautogui`, OCRs via `winocr` (Windows native)
+- Returns extracted text string or `"[No text detected on screen]"` / `"[OCR error: ...]"`
 
 #### `modes/whisperflow.py`
 - Class: `WhisperFlowMode`

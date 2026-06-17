@@ -8,6 +8,13 @@ TOOL_DESCRIPTIONS = """
 - get_datetime(): Get the current date and time
 - calculate(expression): Safely evaluate a math expression, e.g. calculate("(2+3)*4")
 - open_app(app_name): Launch a desktop application (chrome, vscode, notepad, explorer, spotify, terminal, cmd, calculator, brave)
+- take_note(note): Save a note to the user's notes file
+- read_notes(last_n): Read the user's saved notes (default 5)
+- get_system_info(): Get CPU, RAM, and disk usage on this machine
+- open_url(url): Open a URL or bookmark (github, gmail, youtube) in the browser
+- read_clipboard(): Read the current clipboard contents
+- get_news(topic): Fetch news headlines (general, tech, science, us)
+- media_control(action): Control media playback (play, pause, next, previous, volume up, volume down, mute)
 """
 
 PLANNER_PROMPT = """You are Jarvis's intent router. Analyze the user's request and create a plan.
@@ -49,7 +56,31 @@ User: what is the date
 Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": ""}
 
 User: calculate 15 percent of 200
-Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": ""}"""
+Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": ""}
+
+User: take a note
+Assistant: {"intent": "tool_request", "plan": [{"tool": "take_note", "args": {"note": "note text"}}], "message": ""}
+
+User: read my notes
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}], "message": ""}
+
+User: what is my system status
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_system_info", "args": {}}], "message": ""}
+
+User: open github in browser
+Assistant: {"intent": "tool_request", "plan": [{"tool": "open_url", "args": {"url": "github"}}], "message": ""}
+
+User: what is on my clipboard
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_clipboard", "args": {}}], "message": ""}
+
+User: give me the latest news
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_news", "args": {"topic": "general"}}], "message": ""}
+
+User: play music
+Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "play"}}], "message": ""}
+
+User: next song
+Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "next"}}], "message": ""}"""
 
 
 def _extract_json(text: str) -> str:

@@ -8,3 +8,6 @@ kokoro-onnx
 pyautogui
 ddgs
 geoip2
+psutil
+feedparser
+winocr
