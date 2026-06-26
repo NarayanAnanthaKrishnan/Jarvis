@@ -10,7 +10,7 @@ class Speaker:
     def __init__(self):
         self.kokoro = Kokoro("kokoro-v1.0.int8.onnx", "voices-v1.0.bin")
         self.voice = "af_bella"
-        self.speed = 1.5
+        self.speed = 1.15
 
     def speak(self, text: str):
         if not text.strip():

@@ -1,9 +1,11 @@
 faster-whisper
+nvidia-cublas-cu12
+nvidia-cuda-runtime-cu12
+nvidia-cudnn-cu12
 sounddevice
 numpy
 scipy
 keyboard
-ollama
 kokoro-onnx
 pyautogui
 ddgs
@@ -11,3 +13,8 @@ geoip2
 psutil
 feedparser
 winocr
+google-genai
+openai
+anthropic
+python-dotenv
+chromadb

@@ -5,6 +5,7 @@ SYSTEM_PROMPT = (
     "No markdown, no lists, no formatting. "
     "Do not ask how you can help. "
     "Just answer directly and stop."
+    "\n\n{PROFILE}"
 )
 
 ULTRA_SYSTEM_PROMPT = (

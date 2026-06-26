@@ -1,5 +1,6 @@
 import threading
 import time
+import numpy as np
 from audio.recorder import Recorder
 from stt.transcriber import Transcriber
 from llm.client import LLMClient
@@ -15,39 +16,55 @@ class JarvisMode:
         self.transcriber = transcriber
         self.llm = llm
         self.speaker = speaker
+        self.conversation_history: list[str] = []
 
     def on_activate(self):
         self.recorder.start()
 
     def on_release(self):
+        audio: np.ndarray = np.array([])
         if self.recorder.is_recording:
-            self.recorder.stop()
-        threading.Thread(target=self._run_pipeline, daemon=True).start()
+            audio = self.recorder.stop()
+        if len(audio) > 0:
+            threading.Thread(target=self._run_pipeline, args=(audio,), daemon=True).start()
 
-    def _run_pipeline(self):
+    def _truncate_response(self, text: str, max_chars: int = 400) -> str:
+        if len(text) <= max_chars:
+            return text
+        truncated = text[:max_chars]
+        for sep in (". ", "! ", "? "):
+            idx = truncated.rfind(sep)
+            if idx > max_chars // 2:
+                return truncated[:idx + 1]
+        return truncated[:max_chars - 3] + "..."
+
+    def _run_pipeline(self, audio: np.ndarray):
         try:
             t0 = time.time()
-
-            audio = self.recorder.stop()
-            if len(audio) == 0:
-                return
-            t1 = time.time()
 
             text = self.transcriber.transcribe(audio)
             if not text:
                 print("⚠ Could not understand audio.")
                 return
-            t2 = time.time()
+            t1 = time.time()
 
             print(f"\n🗣 You: {text}")
             print("  🤔 Planning...")
 
-            plan = create_plan(text, self.llm)
-            t3 = time.time()
+            plan = create_plan(text, self.llm, conversation_history=self.conversation_history)
+            t2 = time.time()
 
-            if plan.get("intent") == "chat":
+            if plan.get("intent") == "new_session":
+                summary = self.llm.rotate_session()
+                reply = "Started a fresh session."
+                if summary:
+                    reply = f"Started a fresh session."
+                llm_end = time.time()
+
+            elif plan.get("intent") == "chat":
                 reply = plan.get("message", "")
                 if not reply:
+                    self.llm.refresh_memories(text)
                     reply = self.llm.chat(text)
                 llm_end = time.time()
             else:
@@ -55,25 +72,28 @@ class JarvisMode:
                 if steps:
                     print(f"  📋 Plan: {[s['tool'] for s in steps]}")
                     results = execute_plan(steps)
-                    t4 = time.time()
+                    t3 = time.time()
                     print("  📝 Summarizing...")
                     reply = summarize(text, results, self.llm)
                     llm_end = time.time()
-                    print(f"  ⏱  Execute: {t4-t3:.2f}s | Summarize: {llm_end-t4:.2f}s")
+                    print(f"  ⏱  Execute: {t3-t2:.2f}s | Summarize: {llm_end-t3:.2f}s")
                 else:
+                    self.llm.refresh_memories(text)
                     reply = self.llm.chat(text)
                     llm_end = time.time()
 
             if not reply.strip():
                 reply = "I could not find an answer to that."
 
+            reply = self._truncate_response(reply, max_chars=400)
+            self.conversation_history.append(text)
+            if len(self.conversation_history) > 2:
+                self.conversation_history = self.conversation_history[-2:]
+
             print(f"🤖 Jarvis: {reply}\n")
             self.speaker.speak(reply)
-            t5 = time.time()
+            t4 = time.time()
 
-            print(f"  ⏱  Record: {t1-t0:.2f}s | STT: {t2-t1:.2f}s | Plan: {t3-t2:.2f}s | LLM: {llm_end-t3:.2f}s | TTS: {t5-llm_end:.2f}s | TOTAL: {t5-t0:.2f}s")
+            print(f"  ⏱  STT: {t1-t0:.2f}s | Plan: {t2-t1:.2f}s | LLM: {llm_end-t2:.2f}s | TTS: {t4-llm_end:.2f}s | TOTAL: {t4-t0:.2f}s")
         except Exception as e:
-            print(f"❌ Pipeline error: {e}")
-        finally:
-            if self.recorder.is_recording:
-                self.recorder.stop()
+            print(f"[X] Pipeline error: {e}")

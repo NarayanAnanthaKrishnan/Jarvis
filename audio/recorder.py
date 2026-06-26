@@ -21,6 +21,8 @@ class Recorder:
             callback=self._callback
         )
         self.stream.start()
+        import time
+        time.sleep(0.03)
         print("🎙 Listening...")
 
     def _callback(self, indata: np.ndarray, frames: int, time, status):

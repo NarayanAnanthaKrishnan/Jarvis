@@ -1,5 +1,6 @@
 import threading
 import time
+import numpy as np
 import pyautogui
 import pyperclip
 from audio.recorder import Recorder
@@ -21,29 +22,26 @@ class UltraMode:
         self.recorder.start()
 
     def on_release(self):
+        audio: np.ndarray = np.array([])
         if self.recorder.is_recording:
-            self.recorder.stop()
-        threading.Thread(target=self._run_pipeline, daemon=True).start()
+            audio = self.recorder.stop()
+        if len(audio) >= self.recorder.sample_rate * 0.5:
+            threading.Thread(target=self._run_pipeline, args=(audio,), daemon=True).start()
 
-    def _run_pipeline(self):
+    def _run_pipeline(self, audio: np.ndarray):
         try:
             t0 = time.time()
-
-            audio = self.recorder.stop()
-            if len(audio) < self.recorder.sample_rate * 0.5:
-                return
-            t1 = time.time()
 
             user_text = self.transcriber.transcribe(audio)
             if not user_text:
                 print("⚠ Could not understand audio.")
                 return
-            t2 = time.time()
+            t1 = time.time()
             print(f"\n🗣 You: {user_text}")
 
             print("  📸 OCR-ing screen...")
             ocr_text = capture_and_ocr()
-            t3 = time.time()
+            t2 = time.time()
             print(f"  📄 Screen text ({len(ocr_text)} chars)")
 
             company = self._extract_company(user_text, ocr_text)
@@ -51,16 +49,16 @@ class UltraMode:
             if company:
                 print(f"  🔍 Searching for: {company}")
                 search_result = search_web(f"{company} company overview", num_results=3)
-                t4 = time.time()
+                t3 = time.time()
                 print(f"  ✅ Search done ({len(search_result)} chars)")
 
             print("  ✍️ Generating...")
             messages = self._build_messages(user_text, ocr_text, search_result)
-            response = self.llm.call_raw(messages, temp=0.3)
-            t5 = time.time()
+            response = self.llm.call_raw(messages, temp=0.3, max_tokens=2000)
+            t4 = time.time()
 
             if response is None:
-                print("❌ LLM call failed.")
+                print("[X] LLM call failed.")
                 return
 
             reply = response["message"]["content"].strip()
@@ -70,18 +68,15 @@ class UltraMode:
 
             pyperclip.copy(reply)
             pyautogui.hotkey("ctrl", "v")
-            t6 = time.time()
+            t5 = time.time()
 
             print(f"✅ Pasted ({len(reply)} chars)")
-            print(f"  ⏱  Record: {t1-t0:.2f}s | STT: {t2-t1:.2f}s | OCR: {t3-t2:.2f}s | "
-                  f"Search: {t4-t3 if company else 0:.2f}s | Gen: {t5-t4 if company else t5-t3:.2f}s | "
-                  f"Paste: {t6-t5:.2f}s | TOTAL: {t6-t0:.2f}s")
+            print(f"  ⏱  STT: {t1-t0:.2f}s | OCR: {t2-t1:.2f}s | "
+                  f"Search: {t3-t2 if company else 0:.2f}s | Gen: {t4-t3 if company else t4-t2:.2f}s | "
+                  f"Paste: {t5-t4:.2f}s | TOTAL: {t5-t0:.2f}s")
 
         except Exception as e:
-            print(f"❌ Ultra mode error: {e}")
-        finally:
-            if self.recorder.is_recording:
-                self.recorder.stop()
+            print(f"[X] Ultra mode error: {e}")
 
     def _extract_company(self, user_text: str, ocr_text: str) -> str | None:
         keywords = [" at ", " for ", " company ", " corp ", " inc "]

@@ -13,6 +13,20 @@ voices-v1.0.bin
 # GeoIP database (download separately from MaxMind)
 data/GeoLite2-City.mmdb
 
+# Environment variables (API keys, secrets)
+.env
+
+# Personal data
+notes.txt
+profile/profile.md
+profile/README.md
+
+# ChromaDB vector database (contains personal memories)
+memory_db/
+
+# OpenCode AI assistant plans (contains session analysis)
+.opencode/
+
 # OS junk
 Thumbs.db
 .DS_Store

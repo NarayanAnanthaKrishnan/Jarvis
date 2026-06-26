@@ -4,12 +4,13 @@ from tools.weather import get_weather
 from tools.datetime_tool import get_datetime
 from tools.calculator import calculate
 from tools.app_launcher import open_app
-from tools.notes import take_note, read_notes
+from tools.notes import take_note, read_notes, update_note, delete_note
 from tools.system_info import get_system_info
 from tools.browser import open_url
 from tools.clipboard_tool import read_clipboard
 from tools.news import get_news
 from tools.media import media_control
+from memory.store import memory_store
 
 
 TOOL_DEFINITIONS = [
@@ -194,7 +195,67 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "store_memory",
+            "description": "Remember a fact or preference about the user. Use when the user says 'remember that...' or asks you to remember something.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The fact or preference to remember, phrased as a statement"
+                    }
+                },
+                "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_note",
+            "description": "Update or correct an existing note by its index number. Use after read_notes to find the index.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "The 1-based index of the note to update"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "The new content for the note"
+                    }
+                },
+                "required": ["index", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_note",
+            "description": "Delete a note by its index number. Use after read_notes to find the index.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "The 1-based index of the note to delete"
+                    }
+                },
+                "required": ["index"]
+            }
+        }
+    },
 ]
+
+def store_memory(content: str) -> str:
+    memory_store.add("semantic", content, metadata={"type": "fact"})
+    return f"Remembered: {content}"
+
 
 TOOL_MAP = {
     "search_web": search_web,
@@ -210,6 +271,9 @@ TOOL_MAP = {
     "read_clipboard": read_clipboard,
     "get_news": get_news,
     "media_control": media_control,
+    "store_memory": store_memory,
+    "update_note": update_note,
+    "delete_note": delete_note,
 }
 
 

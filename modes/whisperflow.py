@@ -1,4 +1,5 @@
 import threading
+import numpy as np
 import pyautogui
 import pyperclip
 from audio.recorder import Recorder
@@ -14,16 +15,14 @@ class WhisperFlowMode:
         self.recorder.start()
 
     def on_release(self):
+        audio: np.ndarray = np.array([])
         if self.recorder.is_recording:
-            self.recorder.stop()
-        threading.Thread(target=self._run_pipeline, daemon=True).start()
-
-    def _run_pipeline(self):
-        try:
             audio = self.recorder.stop()
-            if len(audio) < self.recorder.sample_rate * 0.5:
-                return
+        if len(audio) >= self.recorder.sample_rate * 0.5:
+            threading.Thread(target=self._run_pipeline, args=(audio,), daemon=True).start()
 
+    def _run_pipeline(self, audio: np.ndarray):
+        try:
             full_text = self.transcriber.transcribe(audio)
             if not full_text:
                 return
@@ -31,7 +30,4 @@ class WhisperFlowMode:
             pyperclip.copy(full_text)
             pyautogui.hotkey("ctrl", "v")
         except Exception as e:
-            print(f"❌ WhisperFlow error: {e}")
-        finally:
-            if self.recorder.is_recording:
-                self.recorder.stop()
+            print(f"[X] WhisperFlow error: {e}")
