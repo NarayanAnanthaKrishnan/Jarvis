@@ -12,6 +12,9 @@ class Speaker:
         self.voice = "af_bella"
         self.speed = 1.15
 
+    def stop(self) -> None:
+        sd.stop()
+
     def speak(self, text: str):
         if not text.strip():
             return

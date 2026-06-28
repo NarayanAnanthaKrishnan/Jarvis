@@ -30,3 +30,8 @@ memory_db/
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Runtime logs and temp output
+*.log
+err.txt
+out.txt

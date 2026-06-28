@@ -1,10 +1,8 @@
 import threading
 import time
-import numpy as np
 import pyautogui
 import pyperclip
-from audio.recorder import Recorder
-from stt.transcriber import Transcriber
+from stt.stream_stt import StreamSTT
 from llm.client import LLMClient
 from llm.prompts import ULTRA_SYSTEM_PROMPT
 from tools.screen_ocr import capture_and_ocr
@@ -13,26 +11,29 @@ from tools.profile_loader import load_profile
 
 
 class UltraMode:
-    def __init__(self, recorder: Recorder, transcriber: Transcriber, llm: LLMClient):
-        self.recorder = recorder
-        self.transcriber = transcriber
+    def __init__(self, stream_stt: StreamSTT, llm: LLMClient):
+        self.stream_stt = stream_stt
         self.llm = llm
+        self._is_recording = False
 
     def on_activate(self):
-        self.recorder.start()
+        if self._is_recording:
+            return
+        self._is_recording = True
+        self.stream_stt.start()
 
     def on_release(self):
-        audio: np.ndarray = np.array([])
-        if self.recorder.is_recording:
-            audio = self.recorder.stop()
-        if len(audio) >= self.recorder.sample_rate * 0.5:
-            threading.Thread(target=self._run_pipeline, args=(audio,), daemon=True).start()
+        if not self._is_recording:
+            return
+        self._is_recording = False
+        self.stream_stt.stop()
+        threading.Thread(target=self._run_pipeline, daemon=True).start()
 
-    def _run_pipeline(self, audio: np.ndarray):
+    def _run_pipeline(self):
         try:
             t0 = time.time()
 
-            user_text = self.transcriber.transcribe(audio)
+            user_text = self.stream_stt.text()
             if not user_text:
                 print("⚠ Could not understand audio.")
                 return

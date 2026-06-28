@@ -1,44 +1,46 @@
 import atexit
 import keyboard
-from audio.recorder import Recorder
-from stt.transcriber import Transcriber
+from stt.stream_stt import StreamSTT
 from llm.client import LLMClient
 from tts.speaker import Speaker
-from config import HOTKEY, WHISPERFLOW_HOTKEY, ULTRA_HOTKEY, SAMPLE_RATE
+from config import HOTKEY, WHISPERFLOW_HOTKEY, ULTRA_HOTKEY
 from modes.jarvis import JarvisMode
 from modes.whisperflow import WhisperFlowMode
 from modes.ultra import UltraMode
 
-recorder = Recorder(sample_rate=SAMPLE_RATE)
-transcriber = Transcriber()
-llm = LLMClient()
-speaker = Speaker()
 
-jarvis = JarvisMode(recorder, transcriber, llm, speaker)
-whisperflow = WhisperFlowMode(recorder, transcriber)
-ultra = UltraMode(recorder, transcriber, llm)
+def main() -> None:
+    stream_stt = StreamSTT()
+    llm = LLMClient()
+    speaker = Speaker()
+
+    jarvis = JarvisMode(stream_stt, llm, speaker)
+    whisperflow = WhisperFlowMode(stream_stt)
+    ultra = UltraMode(stream_stt, llm)
+
+    def _save_session() -> None:
+        try:
+            from memory.session import save_session
+            saved = save_session(llm, llm.history)
+            if saved:
+                print("  💾 Session saved to long-term memory.")
+        except Exception:
+            pass
+
+    atexit.register(_save_session)
+
+    print("✅ Jarvis running. Hold CTRL+SHIFT+J to chat, press CTRL+SHIFT+K to toggle dictation, CTRL+SHIFT+U for Ultra mode.")
+
+    keyboard.add_hotkey(HOTKEY, jarvis.on_activate, suppress=False, trigger_on_release=False)
+    keyboard.add_hotkey(HOTKEY, jarvis.on_release, suppress=True, trigger_on_release=True)
+
+    keyboard.add_hotkey(WHISPERFLOW_HOTKEY, whisperflow.toggle, suppress=True)
+
+    keyboard.add_hotkey(ULTRA_HOTKEY, ultra.on_activate, suppress=False, trigger_on_release=False)
+    keyboard.add_hotkey(ULTRA_HOTKEY, ultra.on_release, suppress=True, trigger_on_release=True)
+
+    keyboard.wait()
 
 
-@atexit.register
-def _save_session():
-    try:
-        from memory.session import save_session
-        saved = save_session(llm, llm.history)
-        if saved:
-            print(f"  💾 Session saved to long-term memory.")
-    except Exception:
-        pass
-
-
-print("✅ Jarvis running. Hold CTRL+SHIFT+J to chat, CTRL+SHIFT+K to dictate, CTRL+SHIFT+U for Ultra mode.")
-
-keyboard.add_hotkey(HOTKEY, jarvis.on_activate, suppress=False, trigger_on_release=False)
-keyboard.add_hotkey(HOTKEY, jarvis.on_release, suppress=True, trigger_on_release=True)
-
-keyboard.add_hotkey(WHISPERFLOW_HOTKEY, whisperflow.on_activate, suppress=False, trigger_on_release=False)
-keyboard.add_hotkey(WHISPERFLOW_HOTKEY, whisperflow.on_release, suppress=True, trigger_on_release=True)
-
-keyboard.add_hotkey(ULTRA_HOTKEY, ultra.on_activate, suppress=False, trigger_on_release=False)
-keyboard.add_hotkey(ULTRA_HOTKEY, ultra.on_release, suppress=True, trigger_on_release=True)
-
-keyboard.wait()
+if __name__ == "__main__":
+    main()

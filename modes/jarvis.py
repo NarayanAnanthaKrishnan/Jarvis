@@ -1,8 +1,6 @@
 import threading
 import time
-import numpy as np
-from audio.recorder import Recorder
-from stt.transcriber import Transcriber
+from stt.stream_stt import StreamSTT
 from llm.client import LLMClient
 from tts.speaker import Speaker
 from agent.planner import create_plan
@@ -11,22 +9,27 @@ from agent.summarizer import summarize
 
 
 class JarvisMode:
-    def __init__(self, recorder: Recorder, transcriber: Transcriber, llm: LLMClient, speaker: Speaker):
-        self.recorder = recorder
-        self.transcriber = transcriber
+    def __init__(self, stream_stt: StreamSTT, llm: LLMClient, speaker: Speaker):
+        self.stream_stt = stream_stt
         self.llm = llm
         self.speaker = speaker
+        self._is_recording = False
+        self._lock = threading.Lock()
         self.conversation_history: list[str] = []
 
     def on_activate(self):
-        self.recorder.start()
+        if self._is_recording:
+            return
+        self.speaker.stop()
+        self._is_recording = True
+        self.stream_stt.start()
 
     def on_release(self):
-        audio: np.ndarray = np.array([])
-        if self.recorder.is_recording:
-            audio = self.recorder.stop()
-        if len(audio) > 0:
-            threading.Thread(target=self._run_pipeline, args=(audio,), daemon=True).start()
+        if not self._is_recording:
+            return
+        self._is_recording = False
+        self.stream_stt.stop()
+        threading.Thread(target=self._run_pipeline, daemon=True).start()
 
     def _truncate_response(self, text: str, max_chars: int = 400) -> str:
         if len(text) <= max_chars:
@@ -38,11 +41,11 @@ class JarvisMode:
                 return truncated[:idx + 1]
         return truncated[:max_chars - 3] + "..."
 
-    def _run_pipeline(self, audio: np.ndarray):
+    def _run_pipeline(self):
         try:
             t0 = time.time()
 
-            text = self.transcriber.transcribe(audio)
+            text = self.stream_stt.text()
             if not text:
                 print("⚠ Could not understand audio.")
                 return
@@ -86,9 +89,10 @@ class JarvisMode:
                 reply = "I could not find an answer to that."
 
             reply = self._truncate_response(reply, max_chars=400)
-            self.conversation_history.append(text)
-            if len(self.conversation_history) > 2:
-                self.conversation_history = self.conversation_history[-2:]
+            with self._lock:
+                self.conversation_history.append(text)
+                if len(self.conversation_history) > 2:
+                    self.conversation_history = self.conversation_history[-2:]
 
             print(f"🤖 Jarvis: {reply}\n")
             self.speaker.speak(reply)
