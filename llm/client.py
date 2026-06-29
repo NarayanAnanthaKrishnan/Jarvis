@@ -1,4 +1,5 @@
 import json
+from collections.abc import Generator
 from config import PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, GEMINI_API_KEY, GEMINI_MODEL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from llm.prompts import SYSTEM_PROMPT
 from tools.profile_loader import load_profile
@@ -424,3 +425,58 @@ class LLMClient:
         reply = "[Error: Too many tool call rounds]"
         self.history.pop()
         return reply
+
+    def stream_chat(self, messages: list[dict], temp: float = 0.3, max_tokens: int = 1000) -> Generator[str, None, None]:
+        providers = self._get_provider_order()
+        for provider in providers:
+            try:
+                client = self._get_client(provider)
+                converted_messages, system_instruction = self._convert_messages(messages, provider)
+
+                if provider == "openai":
+                    stream = client.chat.completions.create(
+                        model=self._get_model(provider),
+                        messages=converted_messages,
+                        max_tokens=max_tokens,
+                        temperature=temp,
+                        stream=True,
+                    )
+                    for chunk in stream:
+                        delta = chunk.choices[0].delta
+                        if delta and delta.content:
+                            yield delta.content
+                    return
+
+                elif provider == "gemini":
+                    from google.genai import types
+                    stream = client.models.generate_content_stream(
+                        model=self._get_model(provider),
+                        contents=converted_messages,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_instruction,
+                            temperature=temp,
+                            max_output_tokens=max_tokens,
+                        ),
+                    )
+                    for chunk in stream:
+                        if chunk.text:
+                            yield chunk.text
+                    return
+
+                elif provider == "anthropic":
+                    kwargs = {
+                        "model": self._get_model(provider),
+                        "messages": converted_messages,
+                        "max_tokens": max_tokens,
+                    }
+                    if system_instruction:
+                        kwargs["system"] = system_instruction
+                    with client.messages.create(stream=True, **kwargs) as stream:
+                        for event in stream:
+                            if event.type == "content_block_delta" and event.delta.type == "text_delta":
+                                yield event.delta.text
+                    return
+
+            except Exception as e:
+                print(f"  [X] Stream LLM call failed ({provider}): {e}")
+                continue

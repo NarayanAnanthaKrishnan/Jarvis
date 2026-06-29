@@ -1,3 +1,4 @@
+from collections.abc import Generator
 from llm.client import LLMClient
 from tools.profile_loader import load_profile
 
@@ -61,3 +62,35 @@ def summarize(user_input: str, tool_results: list[dict], llm: LLMClient) -> str:
     if not reply:
         return "I could not find an answer to that."
     return reply
+
+
+def stream_summarize(user_input: str, tool_results: list[dict], llm: LLMClient) -> Generator[str, None, None]:
+    if not tool_results:
+        return
+
+    formatted = "\n".join(
+        f"[{r['tool']}] {r['result']}" for r in tool_results
+    )
+
+    if not formatted.strip():
+        return
+
+    prompt = SUMMARIZER_PROMPT.replace("{USER_INPUT}", user_input).replace("{TOOL_RESULTS}", formatted)
+
+    profile = load_profile()
+    from memory.store import memory_store
+    semantic = memory_store.query("semantic", user_input, n=3)
+    episodic = memory_store.query("episodic", user_input, n=2)
+    system_msg = "You produce concise spoken responses from tool data. Use exact numbers. Never say you couldn't find something if data exists — report what was found."
+    if profile:
+        system_msg += f"\nUser context:\n{profile}"
+    if semantic or episodic:
+        items = [f"- {m}" for m in semantic + episodic]
+        system_msg += "\nRelevant memories:\n" + "\n".join(items)
+
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": prompt}
+    ]
+
+    yield from llm.stream_chat(messages, temp=0.1)

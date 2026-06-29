@@ -19,3 +19,5 @@ openai
 anthropic
 python-dotenv
 chromadb
+requests
+beautifulsoup4

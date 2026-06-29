@@ -1,4 +1,4 @@
-from tools.web_search import search_web
+from tools.web_search import search_web, fetch_url
 from tools.geoip import get_city_info
 from tools.weather import get_weather
 from tools.datetime_tool import get_datetime
@@ -18,16 +18,37 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "search_web",
-            "description": "Search the web for current information",
+            "description": "Search the web for current information. Use when you need news, facts, or answers not covered by other tools.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "The search query"
+                        "description": "The search query — be specific and include context like year, location, or topic"
+                    },
+                    "num_results": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 8)"
                     }
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_url",
+            "description": "Fetch and extract readable text content from a URL. Use when search results give a promising link but not enough detail.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The full URL to fetch and read"
+                    }
+                },
+                "required": ["url"]
             }
         }
     },
@@ -259,6 +280,7 @@ def store_memory(content: str) -> str:
 
 TOOL_MAP = {
     "search_web": search_web,
+    "fetch_url": fetch_url,
     "get_city_info": get_city_info,
     "get_weather": get_weather,
     "get_datetime": get_datetime,

@@ -1,9 +1,11 @@
 import json
+from datetime import datetime
 from llm.client import LLMClient
 from tools.profile_loader import load_profile
 
 TOOL_DESCRIPTIONS = """
-- search_web(query): Search the web for current information, news, facts
+- search_web(query, num_results=8): Search the web for current information, news, facts. Be specific with your query.
+- fetch_url(url): Fetch and extract readable text from a URL. Use when search results give a promising link but not enough detail.
 - get_city_info(ip): Look up city and region from IP address (use "auto" for current location)
 - get_weather(city): Get current weather conditions for a city
 - get_datetime(): Get the current date and time
@@ -18,9 +20,12 @@ TOOL_DESCRIPTIONS = """
 - read_clipboard(): Read the current clipboard contents
 - get_news(topic): Fetch news headlines (general, tech, science, us)
 - media_control(action): Control media playback (play, pause, next, previous, volume up, volume down, mute)
+- store_memory(content): Remember a fact or preference about the user
 """
 
-PLANNER_PROMPT = """You are Jarvis's intent router. Analyze the user's request and create a plan.
+PLANNER_PROMPT = """Today's date: {CURRENT_DATE}
+
+You are Jarvis's intent router. Analyze the user's request and create a plan.
 User profile (for personalization):
 {PROFILE}
 
@@ -40,80 +45,86 @@ Rules:
 - If the user says "start fresh", "new session", "clear context", or "forget everything", output "new_session" intent.
 - For weather: if a city is named, use get_weather directly. If no city is named but there is a default weather city in memories, use that city. If no city anywhere, use get_city_info first.
 - Use conversation history to resolve pronouns — "he", "she", "it", "they", "that" refer to the subject of the previous user message.
-- If the user corrects or contradicts a fact that was previously noted, use update_note to fix the existing note.
-- For general knowledge, news, facts: use search_web.
+- If the user corrects or contradicts a fact that was previously noted, use read_notes first to find the index, then update_note.
+- For general knowledge, news, facts: use search_web first. If results are too vague, use fetch_url on the most promising link.
+- Multi-step: You can chain tools. For example, search_web for something, then fetch_url on the best result to get full details.
+- Include current year or context in search queries for better results (e.g. "2026 World Cup" not just "World Cup").
+- Include "confidence" (0.0 to 1.0) in your output. Set confidence < 0.6 if you're unsure about the plan or need clarification.
 - Only include tools DIRECTLY needed. Do NOT include get_city_info unless the query needs location context (weather, local info, "near me").
 - Output ONLY valid JSON. No markdown, no code blocks, no backticks, no formatting.
 
 Output format for chat:
-{"intent": "chat", "plan": [], "message": "short friendly reply"}
+{"intent": "chat", "plan": [], "message": "short friendly reply", "confidence": 1.0}
 
 Output format for tool requests:
-{"intent": "tool_request", "plan": [{"tool": "tool_name", "args": {"param": "value"}}], "message": ""}
+{"intent": "tool_request", "plan": [{"tool": "tool_name", "args": {"param": "value"}}], "message": "", "confidence": 1.0}
 
 Output format for new session:
-{"intent": "new_session", "plan": [], "message": ""}
+{"intent": "new_session", "plan": [], "message": "", "confidence": 1.0}
 
 Examples:
 User: hello
-Assistant: {"intent": "chat", "plan": [], "message": "Hello! How can I help you today?"}
+Assistant: {"intent": "chat", "plan": [], "message": "Hello! How can I help you today?", "confidence": 1.0}
 
 User: what is the weather in London
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_weather", "args": {"city": "London"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_weather", "args": {"city": "London"}}], "message": "", "confidence": 1.0}
 
 User: what is the weather like here
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_weather", "args": {"city": "auto"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_weather", "args": {"city": "auto"}}], "message": "", "confidence": 1.0}
 
-User: search for AI news
-Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "AI news 2026"}}], "message": ""}
+User: who won the latest election and what did they promise
+Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "2026 latest election results and promises"}}], "message": "", "confidence": 0.9}
+
+User: what does the article say about AI regulation
+Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "AI regulation 2026 latest developments"}}, {"tool": "fetch_url", "args": {"url": "(best result URL from previous step)"}}], "message": "", "confidence": 0.8}
 
 User: what time is it
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": "", "confidence": 1.0}
 
 User: what is the date
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": "", "confidence": 1.0}
 
 User: calculate 15 percent of 200
-Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": "", "confidence": 1.0}
 
 User: take a note
-Assistant: {"intent": "tool_request", "plan": [{"tool": "take_note", "args": {"note": "note text"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "take_note", "args": {"note": "note text"}}], "message": "", "confidence": 1.0}
 
 User: read my notes
-Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}], "message": "", "confidence": 1.0}
 
 User: correct note 2 to say Ronaldo scored twice instead
-Assistant: {"intent": "tool_request", "plan": [{"tool": "update_note", "args": {"index": 2, "content": "Cristiano Ronaldo scored two goals today."}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}, {"tool": "update_note", "args": {"index": 2, "content": "Cristiano Ronaldo scored two goals today."}}], "message": "", "confidence": 0.9}
 
 User: delete note 3
-Assistant: {"intent": "tool_request", "plan": [{"tool": "delete_note", "args": {"index": 3}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "delete_note", "args": {"index": 3}}], "message": "", "confidence": 1.0}
 
 User: what is my system status
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_system_info", "args": {}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_system_info", "args": {}}], "message": "", "confidence": 1.0}
 
 User: open github in browser
-Assistant: {"intent": "tool_request", "plan": [{"tool": "open_url", "args": {"url": "github"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "open_url", "args": {"url": "github"}}], "message": "", "confidence": 1.0}
 
 User: what is on my clipboard
-Assistant: {"intent": "tool_request", "plan": [{"tool": "read_clipboard", "args": {}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_clipboard", "args": {}}], "message": "", "confidence": 1.0}
 
 User: give me the latest news
-Assistant: {"intent": "tool_request", "plan": [{"tool": "get_news", "args": {"topic": "general"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "get_news", "args": {"topic": "general"}}], "message": "", "confidence": 1.0}
 
 User: play music
-Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "play"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "play"}}], "message": "", "confidence": 1.0}
 
 User: next song
-Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "next"}}], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "media_control", "args": {"action": "next"}}], "message": "", "confidence": 1.0}
 
 User: remember that I like pepperoni pizza
-Assistant: {"intent": "tool_request", "plan": [{"tool": "store_memory", "args": {"content": "User likes pepperoni pizza"}}], "message": ""}
-
-User: start fresh
-Assistant: {"intent": "new_session", "plan": [], "message": ""}
+Assistant: {"intent": "tool_request", "plan": [{"tool": "store_memory", "args": {"content": "User likes pepperoni pizza"}}], "message": "", "confidence": 1.0}
 
 User: Actually it was Ronaldo who scored, not me
-Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}, {"tool": "update_note", "args": {"index": 2, "content": "Cristiano Ronaldo scored two goals today."}}], "message": ""}"""
+Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}, {"tool": "update_note", "args": {"index": 2, "content": "Cristiano Ronaldo scored two goals today."}}], "message": "", "confidence": 0.9}
+
+User: start fresh
+Assistant: {"intent": "new_session", "plan": [], "message": "", "confidence": 1.0}"""
 
 
 def _extract_json(text: str) -> str:
@@ -159,10 +170,13 @@ def create_plan(user_input: str, llm: LLMClient, conversation_history: list[str]
 
     conv_history = ""
     if conversation_history:
-        lines = [f"Previous: {utterance}" for utterance in conversation_history[-2:]]
+        lines = [f"Previous: {utterance}" for utterance in conversation_history[-8:]]
         conv_history = "\n".join(lines)
 
-    prompt = (PLANNER_PROMPT.replace("{PROFILE}", profile or "(none)")
+    current_date = datetime.now().strftime("%A, %B %d, %Y")
+
+    prompt = (PLANNER_PROMPT.replace("{CURRENT_DATE}", current_date)
+                           .replace("{PROFILE}", profile or "(none)")
                            .replace("{MEMORIES}", memories or "(none)")
                            .replace("{CONVERSATION_HISTORY}", conv_history or "(none)")
                            .replace("{TOOL_DESCRIPTIONS}", TOOL_DESCRIPTIONS))
@@ -177,7 +191,8 @@ def create_plan(user_input: str, llm: LLMClient, conversation_history: list[str]
         return {
             "intent": "chat",
             "plan": [],
-            "message": "I could not process that request right now."
+            "message": "I could not process that request right now.",
+            "confidence": 0.0
         }
 
     raw = response["message"]["content"]
@@ -193,5 +208,6 @@ def create_plan(user_input: str, llm: LLMClient, conversation_history: list[str]
         return {
             "intent": "chat",
             "plan": [],
-            "message": cleaned
+            "message": cleaned,
+            "confidence": 0.3
         }

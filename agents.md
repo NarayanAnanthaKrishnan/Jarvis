@@ -19,20 +19,23 @@
 
 ### Architecture
 ```
-[CTRL+SHIFT+J held]
-    -> sounddevice records audio
-    -> key released -> stop recording, capture audio synchronously
-    -> Thread starts with captured audio (no race on recorder state)
-    -> faster-whisper transcribes (CUDA, beam_size=1, vad_filter)
+[CTRL+SHIFT+J] press
+    -> Session starts, mic listens with VAD
+    -> User speaks → pause 1.5s silence → VAD auto-submits turn
+    -> RealtimeSTT transcribes (base, CUDA float16)
     -> PLANNER (cloud LLM call): classifies intent, outputs JSON plan
        - "chat" intent: short greeting → TTS
        - "tool_request" intent: structured plan with tool steps
     -> EXECUTOR: runs each tool step, collects results
-    -> SUMMARIZER (cloud LLM call): formats results into clean spoken response
+       - On tool error: re-plan with error context (1 retry)
+    -> SUMMARIZER (cloud LLM call, STREAMING): formats results token-by-token
        - Strips metadata, tool names, internal details
        - 1-2 natural sentences
-    -> Kokoro TTS converts response (int8, speed=1.0)
-    -> sounddevice plays audio
+    -> StreamingSpeaker: accumulates tokens → splits on sentence boundaries
+       → Kokoro TTS (int8, speed=1.15) → sounddevice plays sentence by sentence
+[CTRL+SHIFT+J] press again
+    -> Session ends, mic stops, TTS stops
+    -> Full session saved as one episodic memory
 ```
 
 ### Three-Stage Agent Pipeline
@@ -129,7 +132,7 @@ User Input
 - `speak(text: str)` — creates audio at speed=1.0, `sd.play()`, `sd.wait()`
 
 #### `tools/registry.py`
-- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas
+- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas (now includes `fetch_url` for reading full page content)
 - `TOOL_MAP` — dict mapping tool name string → callable function
 - `execute_tool(name, args) -> str` — dispatches to the registered function, returns result string or error
 
@@ -142,8 +145,10 @@ User Input
 - Returns string like `"London: Partly cloudy, +20°C, ↘22km/h, 46% humidity"`
 
 #### `tools/web_search.py`
-- `search_web(query, num_results=3)` — uses `ddgs.DDGS`, returns formatted list of title/body/URL
-- Returns string with newline-separated entries, each truncated at 400 chars
+- `search_web(query, num_results=8)` — uses `ddgs.DDGS`, returns formatted list of title/body/URL
+- Returns full-length entries (no truncation — cloud LLMs handle long text)
+- `fetch_url(url)` — downloads page via `requests`, strips HTML via `BeautifulSoup`, returns first ~4000 chars of readable text
+- Used when search results have promising links but not enough detail
 
 #### `tools/datetime_tool.py`
 - `get_datetime()` — returns current date/time as natural string like `"Monday, June 15 2026, 10:34 AM"`
@@ -185,7 +190,7 @@ User Input
 #### `agent/planner.py`
 - `create_plan(user_input, llm) -> dict` — intent router + planner
 - Uses a dedicated system prompt to classify user intent as `"chat"` or `"tool_request"`
-- Outputs a JSON plan: `{"intent": "...", "plan": [...], "message": "..."}`
+- Outputs a JSON plan: `{"intent": "...", "plan": [...], "message": "...", "confidence": 0.0-1.0}`
 - For `"chat"`: returns a brief friendly message directly (no tool calls)
 - For `"tool_request"`: returns a structured plan array of tool steps
 - For `"new_session"`: signals session rotation (start fresh / clear context)
@@ -193,6 +198,11 @@ User Input
 - Temperature=0.1 for deterministic JSON output
 - Injects user profile from `profile/profile.md` into prompt for personalization
 - Injects top-5 semantic + top-3 episodic memories from ChromaDB into prompt
+- Injects current date into prompt for time-aware queries
+- Injects last 8 conversation turns (up from 2) for better pronoun resolution
+- Includes `fetch_url` in tool descriptions for deep page content extraction
+- Plan includes `confidence` field — if < 0.6, Jarvis asks for confirmation
+- Multi-step chaining supported: search_web → fetch_url on best result
 
 #### `agent/executor.py`
 - `execute_plan(plan) -> list[dict]` — runs each tool step in sequence
@@ -211,15 +221,21 @@ User Input
 
 #### `modes/jarvis.py`
 - Class: `JarvisMode`
-- `__init__(recorder, transcriber, llm, speaker)` — stores shared instances
-- `on_activate()` — starts recording
-- `on_release()` — stops recording, captures audio synchronously, passes to thread:
+- `__init__(stream_stt, llm, speaker, streaming_speaker)` — stores shared instances
+- `toggle_session()` — toggles session on/off
+- Session mode: press CTRL+SHIFT+J to start, press again to end (no hold)
+- VAD auto-submit: after 1.5s silence, turn is auto-submitted to pipeline
+- Mic pauses during processing + TTS, resumes after (no feedback loop)
+- Streaming TTS via `StreamingSpeaker` (token-by-token → sentence TTS)
+- Pipeline per turn:
   1. `agent.planner.create_plan(text, llm)` → plan dict
-  2. If intent is "chat": use plan's message directly, or `llm.refresh_memories()` + `llm.chat()`
+  2. If intent is "chat": use plan's message directly
   3. If intent is "tool_request": `agent.executor.execute_plan(steps)` → results
-  4. `agent.summarizer.summarize(text, results, llm)` → clean speech
-  5. If intent is "new_session": `llm.rotate_session()` → summarize + store + reset history
-  6. Falls back to `llm.chat()` if plan has no steps
+  4. If any tool errored: re-plan with error context (1 retry)
+  5. If streaming enabled: `agent.summarizer.stream_summarize()` → `streaming_speaker.speak_stream()`
+  6. If intent is "new_session": `llm.rotate_session()` → reset history
+- Session end: saves full session history as one episodic memory
+- Fallback to blocking `summarize()` + `speaker.speak()` if streaming fails
 
 #### `modes/ultra.py`
 - Class: `UltraMode`
@@ -497,6 +513,8 @@ nvidia-cublas-cu12           # CUDA 12.x cuBLAS for faster-whisper (Phase B2)
 nvidia-cuda-runtime-cu12     # CUDA 12.x runtime for faster-whisper (Phase B2)
 nvidia-cudnn-cu12            # cuDNN 9 for faster-whisper (Phase B2)
 chromadb                     # Vector memory store (Phase C)
+requests                     # HTTP for fetch_url tool
+beautifulsoup4               # HTML parsing for fetch_url tool
 ```
 
 ## Setup Steps
