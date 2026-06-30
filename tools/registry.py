@@ -11,6 +11,7 @@ from tools.clipboard_tool import read_clipboard
 from tools.news import get_news
 from tools.media import media_control
 from memory.store import memory_store
+from memory.reminders import add_reminder, parse_when, format_pending
 
 
 TOOL_DEFINITIONS = [
@@ -271,11 +272,54 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_reminder",
+            "description": "Set a reminder that will alert the user at a specific time. Supports natural language times like '3pm tomorrow', 'in 20 minutes', 'Thursday at 10am'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "What to remind about"
+                    },
+                    "when": {
+                        "type": "string",
+                        "description": "Natural language time for the reminder, e.g. '3pm tomorrow', 'in 20 minutes', '8pm'"
+                    }
+                },
+                "required": ["message", "when"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": "List all pending reminders.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
 ]
 
 def store_memory(content: str) -> str:
     memory_store.add("semantic", content, metadata={"type": "fact"})
     return f"Remembered: {content}"
+
+
+def set_reminder(message: str, when: str) -> str:
+    fire_at = parse_when(when)
+    if fire_at is None:
+        return f"Could not parse time: '{when}'. Try something like '3pm tomorrow' or 'in 20 minutes'."
+    return add_reminder(message, fire_at)
+
+
+def list_reminders() -> str:
+    return format_pending()
 
 
 TOOL_MAP = {
@@ -296,6 +340,8 @@ TOOL_MAP = {
     "store_memory": store_memory,
     "update_note": update_note,
     "delete_note": delete_note,
+    "set_reminder": set_reminder,
+    "list_reminders": list_reminders,
 }
 
 

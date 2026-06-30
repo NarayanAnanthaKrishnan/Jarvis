@@ -82,6 +82,8 @@ User Input
 - `PROVIDER = "gemini"` — LLM provider: "openai" | "gemini" | "anthropic"
 - `OPENAI_API_KEY / GEMINI_API_KEY / ANTHROPIC_API_KEY` — API keys for each provider (loaded from .env via `os.getenv`)
 - `OPENAI_MODEL / GEMINI_MODEL / ANTHROPIC_MODEL` — per-provider model selection
+- `AUTO_EXTRACT = True` — toggle async auto fact extraction after each turn
+- `REMINDER_CHECK_SECONDS = 30` — how often the background thread checks due reminders
 
 #### `audio/recorder.py`
 - Class: `Recorder`
@@ -109,7 +111,7 @@ User Input
 - Class: `LLMClient`
 - **BYOLLM architecture** — supports OpenAI, Gemini, Anthropic via unified internal interface
 - `__init__()` — initializes session, history with system prompt, client cache. Loads user profile and injects into system prompt.
-- `_get_client(provider)` — lazy-loads the right SDK client (OpenAI / gemini / Anthropic)
+- `_get_client(provider)` — lazy-loads the right SDK client (OpenAI / gemini / Anthropic). Uses `threading.Lock` for safe concurrent access from async extraction thread.
 - `_convert_messages(messages, provider)` — translates internal format to each provider's message schema:
   - **OpenAI**: pass-through with tool_call_id
   - **Gemini**: `parts` array for user/model, `functionCall`/`functionResponse` for tools
@@ -132,7 +134,7 @@ User Input
 - `speak(text: str)` — creates audio at speed=1.0, `sd.play()`, `sd.wait()`
 
 #### `tools/registry.py`
-- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas (now includes `fetch_url` for reading full page content)
+- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas (19 tools: includes `fetch_url`, `set_reminder`, `list_reminders`)
 - `TOOL_MAP` — dict mapping tool name string → callable function
 - `execute_tool(name, args) -> str` — dispatches to the registered function, returns result string or error
 
@@ -234,6 +236,8 @@ User Input
   4. If any tool errored: re-plan with error context (1 retry)
   5. If streaming enabled: `agent.summarizer.stream_summarize()` → `streaming_speaker.speak_stream()`
   6. If intent is "new_session": `llm.rotate_session()` → reset history
+- After response spoken: fires async `extract_and_store(text, llm)` in daemon thread (zero latency impact)
+- Stores conversation history as labeled `"User: ..."` / `"Assistant: ..."` pairs (not just user text) for accurate follow-up resolution
 - Session end: saves full session history as one episodic memory
 - Fallback to blocking `summarize()` + `speaker.speak()` if streaming fails
 
@@ -264,12 +268,31 @@ User Input
 - `MemoryStore` class — ChromaDB wrapper with two collections (`semantic`, `episodic`)
 - `add(collection, content, metadata)` — stores content with timestamp-based ID
 - `query(collection, text, n)` — semantic search, returns content strings
+- `query_with_scores(collection, text, n)` — returns `[(doc, distance)]` tuples for dedup checking
 - `count(collection)` — returns document count (handles empty collection gracefully)
 - Module-level singleton `memory_store` for use by tools and planner
 
 #### `memory/session.py`
 - `summarize(llm, history)` — summarizes last 10 exchanges via LLM call
 - `save_session(llm, history)` — calls `summarize()` + stores result in episodic collection
+
+#### `memory/extractor.py`
+- `EXTRACTION_PROMPT` — LLM judge prompt that determines if a user message contains a durable fact
+- `extract_and_store(user_text, llm)` — runs in background daemon thread after each turn:
+  1. Calls LLM with extraction prompt (temp=0.1, max_tokens=150)
+  2. Parses `{"store": true/false, "fact": "...", "type": "..."}` from response
+  3. Dedup check via `memory_store.query_with_scores("semantic", fact, n=1)` with threshold < 0.3
+  4. If not duplicate: stores in semantic collection with `"source": "auto"` metadata
+- Silent on all errors (background thread must never crash)
+
+#### `memory/reminders.py`
+- SQLite reminder database (`reminders.db` in project root)
+- `init_db()` — creates table on import
+- `parse_when(natural)` — uses `dateparser` for natural language times like "3pm tomorrow", "in 20 minutes"
+- `add_reminder(message, fire_at)` — inserts reminder, returns confirmation string with formatted time
+- `get_due_reminders()` — queries `fire_at <= now AND fired = 0`
+- `mark_fired(reminder_id)` — marks reminder as fired
+- `list_pending()` / `format_pending()` — lists all pending reminders sorted by time
 
 #### `modes/whisperflow.py`
 - Class: `WhisperFlowMode`
@@ -283,6 +306,7 @@ User Input
 - Global instances: `Recorder`, `Transcriber`, `LLMClient`, `Speaker`
 - Three mode instances: `JarvisMode`, `WhisperFlowMode`, `UltraMode` — all with shared `Recorder`, `Transcriber`, `LLMClient`
 - Six hotkey registrations (press + release for each of three modes), all with `suppress=True`
+- Starts `reminder_loop` daemon thread that checks `get_due_reminders()` every 30s, fires via TTS + plyer desktop notification
 - Call `keyboard.wait()` at end
 
 ---
@@ -478,6 +502,44 @@ No Ollama, no sentence-transformers, no external embedding service.
 
 ---
 
+### Phase C2 — Auto-Extraction + Persistent Reminders ✅ (Complete)
+
+#### What was done
+- **Auto-extraction**: After each turn, a background daemon thread calls the LLM with an extraction prompt to judge if the user's message contains a durable fact. If yes, stores it in the semantic ChromaDB collection with dedup.
+- **Persistent reminders**: SQLite-based reminder store with natural language time parsing via `dateparser`. Background scheduler thread checks every 30s and fires due reminders via TTS + desktop notification.
+- **Conversation history fix**: `jarvis.py` now stores labeled `"User: ..."` / `"Assistant: ..."` pairs instead of bare user text, so follow-up references like "the three matches" can be resolved from the assistant's last reply.
+- **Thread safety**: Added `threading.Lock` to `LLMClient._get_client()` for safe concurrent use from extraction thread.
+- **CUDA DLL fix**: `stream_stt.py` switched from PATH-based to `os.add_dll_directory()` for CUDA DLL registration.
+
+#### New Files
+```
+memory/
+├── extractor.py          # Async LLM-judge fact extraction
+└── reminders.py          # SQLite reminder store + queries
+reminders.db              # Auto-created SQLite file (gitignored)
+```
+
+#### Modified Files
+| File | Change |
+|---|---|
+| `memory/store.py` | Added `query_with_scores()` for dedup |
+| `tools/registry.py` | Added `set_reminder` + `list_reminders` tools |
+| `agent/planner.py` | Added reminder + follow-up examples, consolidated search instructions |
+| `modes/jarvis.py` | Fires `extract_and_store()` async; stores `User:/Assistant:` pairs |
+| `main.py` | Starts `reminder_loop` daemon thread |
+| `config.py` | Added `AUTO_EXTRACT`, `REMINDER_CHECK_SECONDS` |
+| `requirements.txt` | Added `dateparser`, `plyer` |
+| `llm/client.py` | Added `threading.Lock` in `_get_client()` |
+| `stt/stream_stt.py` | Fixed CUDA DLL registration (`os.add_dll_directory`) |
+
+#### Dependencies
+```
+dateparser      # Natural language time parsing for reminders
+plyer           # Desktop notifications for due reminders
+```
+
+---
+
 ### Phase D — Packaging (Future)
 
 ### Phase D — Packaging (Future)
@@ -515,6 +577,8 @@ nvidia-cudnn-cu12            # cuDNN 9 for faster-whisper (Phase B2)
 chromadb                     # Vector memory store (Phase C)
 requests                     # HTTP for fetch_url tool
 beautifulsoup4               # HTML parsing for fetch_url tool
+dateparser                   # Natural language time parsing for reminders (Phase C2)
+plyer                        # Desktop notifications for due reminders (Phase C2)
 ```
 
 ## Setup Steps

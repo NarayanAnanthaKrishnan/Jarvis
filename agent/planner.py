@@ -21,6 +21,8 @@ TOOL_DESCRIPTIONS = """
 - get_news(topic): Fetch news headlines (general, tech, science, us)
 - media_control(action): Control media playback (play, pause, next, previous, volume up, volume down, mute)
 - store_memory(content): Remember a fact or preference about the user
+- set_reminder(message, when): Set a reminder with natural language time like '3pm tomorrow', 'in 20 minutes', '8pm'
+- list_reminders(): List all pending reminders
 """
 
 PLANNER_PROMPT = """Today's date: {CURRENT_DATE}
@@ -32,7 +34,7 @@ User profile (for personalization):
 Relevant memories:
 {MEMORIES}
 
-Recent conversation (for context — use this to resolve pronouns like "he", "she", "it", "they", "that"):
+Recent conversation (includes both user and assistant messages — use the assistant's previous reply to resolve references like "the three matches", "their timings", "those teams"):
 {CONVERSATION_HISTORY}
 
 Available tools:
@@ -44,7 +46,8 @@ Rules:
 - If the user says "remember that" followed by a fact, store it in memory via store_memory.
 - If the user says "start fresh", "new session", "clear context", or "forget everything", output "new_session" intent.
 - For weather: if a city is named, use get_weather directly. If no city is named but there is a default weather city in memories, use that city. If no city anywhere, use get_city_info first.
-- Use conversation history to resolve pronouns — "he", "she", "it", "they", "that" refer to the subject of the previous user message.
+- Use conversation history to resolve references. "User:" and "Assistant:" labels show who spoke. "the three matches", "their timings", "those teams" refer to specific entities mentioned in the ASSISTANT's last reply.
+- For follow-up questions about specific items from a previous answer (e.g. "timings for the three matches"), extract the named entities from the assistant's last response and construct ONE precise search query containing all of them. Do NOT split into multiple searches.
 - If the user corrects or contradicts a fact that was previously noted, use read_notes first to find the index, then update_note.
 - For general knowledge, news, facts: use search_web first. If results are too vague, use fetch_url on the most promising link.
 - Multi-step: You can chain tools. For example, search_web for something, then fetch_url on the best result to get full details.
@@ -83,6 +86,9 @@ Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": 
 
 User: what is the date
 Assistant: {"intent": "tool_request", "plan": [{"tool": "get_datetime", "args": {}}], "message": "", "confidence": 1.0}
+
+User: what are the timings for the three matches
+Assistant: {"intent": "tool_request", "plan": [{"tool": "search_web", "args": {"query": "Ivory Coast vs Norway Mexico vs Ecuador France vs Sweden June 30 2026 World Cup match times kickoff"}}], "message": "", "confidence": 0.9}
 
 User: calculate 15 percent of 200
 Assistant: {"intent": "tool_request", "plan": [{"tool": "calculate", "args": {"expression": "0.15*200"}}], "message": "", "confidence": 1.0}
@@ -124,7 +130,16 @@ User: Actually it was Ronaldo who scored, not me
 Assistant: {"intent": "tool_request", "plan": [{"tool": "read_notes", "args": {"last_n": 5}}, {"tool": "update_note", "args": {"index": 2, "content": "Cristiano Ronaldo scored two goals today."}}], "message": "", "confidence": 0.9}
 
 User: start fresh
-Assistant: {"intent": "new_session", "plan": [], "message": "", "confidence": 1.0}"""
+Assistant: {"intent": "new_session", "plan": [], "message": "", "confidence": 1.0}
+
+User: remind me to push the code at 8pm
+Assistant: {"intent": "tool_request", "plan": [{"tool": "set_reminder", "args": {"message": "push the code", "when": "8pm today"}}], "message": "", "confidence": 1.0}
+
+User: remind me in 20 minutes to take a break
+Assistant: {"intent": "tool_request", "plan": [{"tool": "set_reminder", "args": {"message": "take a break", "when": "in 20 minutes"}}], "message": "", "confidence": 1.0}
+
+User: what are my reminders
+Assistant: {"intent": "tool_request", "plan": [{"tool": "list_reminders", "args": {}}], "message": "", "confidence": 1.0}"""
 
 
 def _extract_json(text: str) -> str:
@@ -170,8 +185,7 @@ def create_plan(user_input: str, llm: LLMClient, conversation_history: list[str]
 
     conv_history = ""
     if conversation_history:
-        lines = [f"Previous: {utterance}" for utterance in conversation_history[-8:]]
-        conv_history = "\n".join(lines)
+        conv_history = "\n".join(conversation_history[-8:])
 
     current_date = datetime.now().strftime("%A, %B %d, %Y")
 

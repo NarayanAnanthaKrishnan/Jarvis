@@ -1,13 +1,37 @@
 import atexit
+import threading
+import time
+
 import keyboard
 from stt.stream_stt import StreamSTT
 from llm.client import LLMClient
 from tts.speaker import Speaker
 from tts.stream_tts import StreamingSpeaker
-from config import HOTKEY, WHISPERFLOW_HOTKEY, ULTRA_HOTKEY
+from config import HOTKEY, WHISPERFLOW_HOTKEY, ULTRA_HOTKEY, REMINDER_CHECK_SECONDS
 from modes.jarvis import JarvisMode
 from modes.whisperflow import WhisperFlowMode
 from modes.ultra import UltraMode
+
+
+def reminder_loop(speaker: Speaker) -> None:
+    from memory.reminders import get_due_reminders, mark_fired
+    while True:
+        try:
+            for r in get_due_reminders():
+                speaker.speak(f"Reminder: {r['message']}")
+                try:
+                    from plyer import notification
+                    notification.notify(
+                        title="Jarvis Reminder",
+                        message=r["message"],
+                        timeout=10
+                    )
+                except Exception:
+                    pass
+                mark_fired(r["id"])
+        except Exception:
+            pass
+        time.sleep(REMINDER_CHECK_SECONDS)
 
 
 def main() -> None:
@@ -30,6 +54,8 @@ def main() -> None:
             pass
 
     atexit.register(_save_session)
+
+    threading.Thread(target=reminder_loop, args=(speaker,), daemon=True).start()
 
     print("✅ Jarvis running. Press CTRL+SHIFT+J to toggle session, press CTRL+SHIFT+K to toggle dictation, CTRL+SHIFT+U for Ultra mode.")
 

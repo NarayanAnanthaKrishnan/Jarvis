@@ -1,4 +1,5 @@
 import json
+import threading
 from collections.abc import Generator
 from config import PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, GEMINI_API_KEY, GEMINI_MODEL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from llm.prompts import SYSTEM_PROMPT
@@ -18,6 +19,7 @@ class LLMClient:
         system_content = SYSTEM_PROMPT.replace("{PROFILE}", f"User profile:\n{profile}" if profile else "")
         self.history = [{"role": "system", "content": system_content}]
         self._clients = {}
+        self._client_lock = threading.Lock()
 
     def _get_provider_order(self) -> list[str]:
         primary = PROVIDER
@@ -31,18 +33,22 @@ class LLMClient:
         return [p for p in ordered if key_map.get(p)]
 
     def _get_client(self, provider: str):
-        if provider in self._clients:
-            return self._clients[provider]
+        cached = self._clients.get(provider)
+        if cached is not None:
+            return cached
 
-        if provider == "openai":
-            from openai import OpenAI
-            self._clients["openai"] = OpenAI(api_key=OPENAI_API_KEY)
-        elif provider == "gemini":
-            from google import genai
-            self._clients["gemini"] = genai.Client(api_key=GEMINI_API_KEY)
-        elif provider == "anthropic":
-            from anthropic import Anthropic
-            self._clients["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY)
+        with self._client_lock:
+            if provider in self._clients:
+                return self._clients[provider]
+            if provider == "openai":
+                from openai import OpenAI
+                self._clients["openai"] = OpenAI(api_key=OPENAI_API_KEY)
+            elif provider == "gemini":
+                from google import genai
+                self._clients["gemini"] = genai.Client(api_key=GEMINI_API_KEY)
+            elif provider == "anthropic":
+                from anthropic import Anthropic
+                self._clients["anthropic"] = Anthropic(api_key=ANTHROPIC_API_KEY)
 
         return self._clients[provider]
 

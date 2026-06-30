@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import threading
 import logging
@@ -8,12 +9,11 @@ from config import STT_MODEL, STT_DEVICE, STT_PREROLL_SECONDS, SESSION_SILENCE_S
 
 
 def _add_cuda_dll_dirs() -> None:
-    import sys
     site = sys.prefix + "/Lib/site-packages"
     for rel in ["nvidia/cublas/bin", "nvidia/cuda_runtime/bin", "nvidia/cudnn/bin", "nvidia/cuda_nvrtc/bin"]:
         d = os.path.join(site, rel)
-        if os.path.isdir(d) and d not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+        if os.path.isdir(d):
+            os.add_dll_directory(d)
 
 
 class StreamSTT:
@@ -61,8 +61,8 @@ class StreamSTT:
         self._session_recorder = AudioToTextRecorder(
             model=SESSION_STT_MODEL,
             language="en",
-            device="cuda",
-            compute_type="float16",
+            device=STT_DEVICE,
+            compute_type="float16" if STT_DEVICE == "cuda" else "int8",
             silero_sensitivity=0.8,
             post_speech_silence_duration=SESSION_SILENCE_SECONDS,
             min_length_of_recording=0.5,

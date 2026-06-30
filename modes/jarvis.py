@@ -7,7 +7,7 @@ from tts.stream_tts import StreamingSpeaker
 from agent.planner import create_plan
 from agent.executor import execute_plan
 from agent.summarizer import summarize, stream_summarize
-from config import STREAMING_ENABLED
+from config import STREAMING_ENABLED, AUTO_EXTRACT
 
 
 class JarvisMode:
@@ -63,6 +63,10 @@ class JarvisMode:
                     self.streaming_speaker.speak_stream(_gen())
                 else:
                     self.speaker.speak(reply)
+                with self._lock:
+                    self._conversation_history.append(f"User: {text}")
+                    self._conversation_history.append(f"Assistant: {reply}")
+                    self._conversation_history = self._conversation_history[-8:]
 
             elif plan.get("intent") == "chat":
                 reply = plan.get("message", "")
@@ -78,9 +82,9 @@ class JarvisMode:
                 reply_display = reply
                 print(f"🤖 Jarvis: {reply_display}")
                 with self._lock:
-                    self._conversation_history.append(text)
-                    if len(self._conversation_history) > 8:
-                        self._conversation_history = self._conversation_history[-8:]
+                    self._conversation_history.append(f"User: {text}")
+                    self._conversation_history.append(f"Assistant: {reply}")
+                    self._conversation_history = self._conversation_history[-8:]
 
             else:
                 steps = plan.get("plan", [])
@@ -109,9 +113,9 @@ class JarvisMode:
 
                     print(f"🤖 Jarvis: {reply}")
                     with self._lock:
-                        self._conversation_history.append(text)
-                        if len(self._conversation_history) > 8:
-                            self._conversation_history = self._conversation_history[-8:]
+                        self._conversation_history.append(f"User: {text}")
+                        self._conversation_history.append(f"Assistant: {reply}")
+                        self._conversation_history = self._conversation_history[-8:]
                 else:
                     self.llm.refresh_memories(text)
                     reply = self.llm.chat(text)
@@ -123,9 +127,9 @@ class JarvisMode:
                         self.speaker.speak(reply)
                     print(f"🤖 Jarvis: {reply}")
                     with self._lock:
-                        self._conversation_history.append(text)
-                        if len(self._conversation_history) > 8:
-                            self._conversation_history = self._conversation_history[-8:]
+                        self._conversation_history.append(f"User: {text}")
+                        self._conversation_history.append(f"Assistant: {reply}")
+                        self._conversation_history = self._conversation_history[-8:]
 
         except Exception as e:
             print(f"  [X] Streaming error: {e}, falling back to blocking")
@@ -135,6 +139,14 @@ class JarvisMode:
                     self.speaker.speak(reply)
             except Exception as e2:
                 print(f"  [X] Fallback also failed: {e2}")
+
+        if AUTO_EXTRACT and text.strip():
+            from memory.extractor import extract_and_store
+            threading.Thread(
+                target=extract_and_store,
+                args=(text, self.llm),
+                daemon=True
+            ).start()
 
         self.stream_stt.resume()
 

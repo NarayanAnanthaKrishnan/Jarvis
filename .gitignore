@@ -31,6 +31,18 @@ memory_db/
 Thumbs.db
 .DS_Store
 
+# SQLite reminder database (contains personal reminders)
+reminders.db
+reminders.db-shm
+reminders.db-wal
+
+# Alternate virtual env name
+.venv/
+
+# AI plan files (contains session analysis and internal plans)
+*_plan.md
+plans/
+
 # Runtime logs and temp output
 *.log
 err.txt

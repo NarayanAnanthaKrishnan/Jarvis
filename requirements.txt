@@ -21,3 +21,5 @@ python-dotenv
 chromadb
 requests
 beautifulsoup4
+dateparser
+plyer
