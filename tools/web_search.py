@@ -30,8 +30,8 @@ def fetch_url(url: str) -> str:
         text = soup.get_text(separator="\n")
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         content = "\n".join(lines)
-        if len(content) > 4000:
-            content = content[:4000] + "\n...[truncated]"
+        if len(content) > 6000:
+            content = content[:6000] + "\n...[truncated]"
         return content if content else "Page contained no readable text."
     except Exception as e:
         return f"Error fetching URL: {e}"

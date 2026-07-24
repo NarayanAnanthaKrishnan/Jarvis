@@ -47,3 +47,6 @@ plans/
 *.log
 err.txt
 out.txt
+
+# Trace files (daily JSONL traces contain full transcript)
+.traces/

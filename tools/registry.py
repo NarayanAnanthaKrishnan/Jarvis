@@ -10,301 +10,14 @@ from tools.browser import open_url
 from tools.clipboard_tool import read_clipboard
 from tools.news import get_news
 from tools.media import media_control
+from tools.screen_ocr import capture_and_ocr
 from memory.store import memory_store
 from memory.reminders import add_reminder, parse_when, format_pending
+from llm.prompts import ULTRA_SYSTEM_PROMPT
+from tools.profile_loader import load_profile
+import pyperclip
+import pyautogui
 
-
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_web",
-            "description": "Search the web for current information. Use when you need news, facts, or answers not covered by other tools.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query — be specific and include context like year, location, or topic"
-                    },
-                    "num_results": {
-                        "type": "integer",
-                        "description": "Number of results to return (default 8)"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "fetch_url",
-            "description": "Fetch and extract readable text content from a URL. Use when search results give a promising link but not enough detail.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The full URL to fetch and read"
-                    }
-                },
-                "required": ["url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_city_info",
-            "description": "Get city, region, and country for an IP address",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "ip": {
-                        "type": "string",
-                        "description": "IP address to look up (default: auto-detect current IP)"
-                    }
-                }
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get current weather for a city",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {
-                        "type": "string",
-                        "description": "City name"
-                    }
-                },
-                "required": ["city"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_datetime",
-            "description": "Get the current date and time",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calculate",
-            "description": "Safely evaluate a mathematical expression",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "The math expression to evaluate, e.g. '(2 + 3) * 4'"
-                    }
-                },
-                "required": ["expression"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_app",
-            "description": "Launch a desktop application on Windows",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app_name": {
-                        "type": "string",
-                        "description": "Name of the app to open (chrome, vscode, notepad, explorer, spotify, terminal, cmd, calculator, brave)"
-                    }
-                },
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "take_note",
-            "description": "Save a note or reminder to the user's notes file.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "note": {"type": "string", "description": "The note content to save"}
-                },
-                "required": ["note"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_notes",
-            "description": "Read the user's saved notes.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "last_n": {"type": "integer", "description": "Number of recent notes to return. Default 5."}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_system_info",
-            "description": "Get current CPU usage, RAM usage, and disk space on this Windows machine.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "open_url",
-            "description": "Open a URL or named bookmark in the browser. Use for GitHub, Gmail, YouTube, or any website.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {"type": "string", "description": "Full URL or bookmark name like 'github', 'youtube', 'gmail'"}
-                },
-                "required": ["url"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "read_clipboard",
-            "description": "Read the current contents of the user's clipboard.",
-            "parameters": {"type": "object", "properties": {}, "required": []}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_news",
-            "description": "Fetch top news headlines. Topics: general, tech, science, us.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "topic": {"type": "string", "description": "News topic: general, tech, science, or us. Default general."}
-                },
-                "required": []
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "media_control",
-            "description": "Control media playback. Actions: play, pause, next, previous, volume up, volume down, mute.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "description": "Media action: play, pause, next, previous, volume up, volume down, mute"}
-                },
-                "required": ["action"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "store_memory",
-            "description": "Remember a fact or preference about the user. Use when the user says 'remember that...' or asks you to remember something.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The fact or preference to remember, phrased as a statement"
-                    }
-                },
-                "required": ["content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "update_note",
-            "description": "Update or correct an existing note by its index number. Use after read_notes to find the index.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "index": {
-                        "type": "integer",
-                        "description": "The 1-based index of the note to update"
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The new content for the note"
-                    }
-                },
-                "required": ["index", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "delete_note",
-            "description": "Delete a note by its index number. Use after read_notes to find the index.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "index": {
-                        "type": "integer",
-                        "description": "The 1-based index of the note to delete"
-                    }
-                },
-                "required": ["index"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_reminder",
-            "description": "Set a reminder that will alert the user at a specific time. Supports natural language times like '3pm tomorrow', 'in 20 minutes', 'Thursday at 10am'.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": "What to remind about"
-                    },
-                    "when": {
-                        "type": "string",
-                        "description": "Natural language time for the reminder, e.g. '3pm tomorrow', 'in 20 minutes', '8pm'"
-                    }
-                },
-                "required": ["message", "when"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_reminders",
-            "description": "List all pending reminders.",
-            "parameters": {
-                "type": "object",
-                "properties": {}
-            }
-        }
-    },
-]
 
 def store_memory(content: str) -> str:
     memory_store.add("semantic", content, metadata={"type": "fact"})
@@ -320,6 +33,40 @@ def set_reminder(message: str, when: str) -> str:
 
 def list_reminders() -> str:
     return format_pending()
+
+
+def read_screen() -> str:
+    return capture_and_ocr()
+
+
+def generate_content(instruction: str, screen_context: str = "", llm=None) -> str:
+    if llm is None:
+        return "[Generation failed: LLM not available]"
+    profile = load_profile()
+    from memory.store import memory_store
+    memories = memory_store.query("semantic", instruction, n=3)
+    parts = []
+    if profile:
+        parts.append(f"About the user:\n{profile}\n")
+    if memories:
+        parts.append(f"Relevant context:\n" + "\n".join(f"- {m}" for m in memories))
+    if screen_context:
+        parts.append(f"Screen content:\n{screen_context}\n")
+    parts.append(f"User instruction: {instruction}")
+    messages = [
+        {"role": "system", "content": ULTRA_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(parts)}
+    ]
+    response = llm.call_raw(messages, temp=0.3, max_tokens=2000)
+    if response is None:
+        return "[Generation failed]"
+    return response["message"]["content"]
+
+
+def paste_at_cursor(text: str) -> str:
+    pyperclip.copy(text)
+    pyautogui.hotkey("ctrl", "v")
+    return f"Pasted {len(text)} characters at cursor."
 
 
 TOOL_MAP = {
@@ -342,14 +89,23 @@ TOOL_MAP = {
     "delete_note": delete_note,
     "set_reminder": set_reminder,
     "list_reminders": list_reminders,
+    "read_screen": read_screen,
+    "generate_content": generate_content,
+    "paste_at_cursor": paste_at_cursor,
 }
 
 
-def execute_tool(name: str, args: dict) -> str:
+def execute_tool(name: str, args: dict, llm=None) -> str:
     fn = TOOL_MAP.get(name)
     if fn is None:
         return f"Error: Unknown tool '{name}'"
     try:
+        if name == "generate_content":
+            return fn(
+                instruction=args.get("instruction", ""),
+                screen_context=args.get("screen_context", ""),
+                llm=llm
+            )
         return fn(**args)
     except Exception as e:
         return f"Error executing {name}: {e}"

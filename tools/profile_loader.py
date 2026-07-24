@@ -2,11 +2,16 @@ from pathlib import Path
 
 
 PROFILE_PATH = Path(__file__).parent.parent / "profile" / "profile.md"
+_cache: str | None = None
 
 
 def load_profile() -> str:
+    global _cache
+    if _cache is not None:
+        return _cache
     if not PROFILE_PATH.exists():
-        return ""
+        _cache = ""
+        return _cache
     with open(PROFILE_PATH, "r", encoding="utf-8") as f:
-        content = f.read().strip()
-    return content
+        _cache = f.read().strip()
+    return _cache

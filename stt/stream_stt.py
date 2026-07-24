@@ -24,7 +24,7 @@ class StreamSTT:
             model=STT_MODEL,
             language="en",
             device=STT_DEVICE,
-            compute_type="float16",
+            compute_type="int8",
             silero_sensitivity=1.0,
             post_speech_silence_duration=9999,
             min_length_of_recording=0,

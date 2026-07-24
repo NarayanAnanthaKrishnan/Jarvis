@@ -19,11 +19,10 @@ if os.path.exists(_env_path):
 
 HOTKEY = "ctrl+shift+j"
 WHISPERFLOW_HOTKEY = "ctrl+shift+k"
-ULTRA_HOTKEY = "ctrl+shift+u"
+MAX_STEPS = 6
 STT_MODEL = "base"
-STT_DEVICE = "cuda"
+STT_DEVICE = "cpu"
 STT_PREROLL_SECONDS = 0.5
-WHISPERFLOW_TOGGLE = True
 STT_STABILIZE_PARTIALS = 2
 SESSION_SILENCE_SECONDS = 1.5
 STREAMING_ENABLED = True
@@ -40,6 +39,9 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-haiku-latest")
 
-MEMORY_DB_PATH = os.getenv("MEMORY_DB_PATH", "")
 AUTO_EXTRACT = True
 REMINDER_CHECK_SECONDS = 30
+PARALLEL_WORKERS = 5
+REFLECTION_ENABLED = False
+RETRIEVAL_GATE = True
+TRACING = True

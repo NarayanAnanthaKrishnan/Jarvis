@@ -1,5 +1,4 @@
 import json
-import threading
 
 from config import AUTO_EXTRACT
 

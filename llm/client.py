@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from collections.abc import Generator
 from config import PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, GEMINI_API_KEY, GEMINI_MODEL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from llm.prompts import SYSTEM_PROMPT
@@ -233,102 +234,116 @@ class LLMClient:
     def _chat(self, model: str, tools: list | None = None) -> dict | None:
         providers = self._get_provider_order()
         for provider in providers:
-            try:
-                client = self._get_client(provider)
-                messages, system_instruction = self._convert_messages(self.history, provider)
-                converted_tools = self._convert_tools(tools, provider)
+            for attempt in range(3):
+                try:
+                    client = self._get_client(provider)
+                    messages, system_instruction = self._convert_messages(self.history, provider)
+                    converted_tools = self._convert_tools(tools, provider)
 
-                if provider == "openai":
-                    kwargs = {
-                        "model": self._get_model(provider),
-                        "messages": messages,
-                        "max_tokens": 300,
-                    }
-                    if converted_tools:
-                        kwargs["tools"] = converted_tools
-                    raw = client.chat.completions.create(**kwargs)
+                    if provider == "openai":
+                        kwargs = {
+                            "model": self._get_model(provider),
+                            "messages": messages,
+                            "max_tokens": 300,
+                        }
+                        if converted_tools:
+                            kwargs["tools"] = converted_tools
+                        raw = client.chat.completions.create(**kwargs)
 
-                elif provider == "gemini":
-                    from google.genai import types
-                    raw = client.models.generate_content(
-                        model=self._get_model(provider),
-                        contents=messages,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            tools=converted_tools,
-                            temperature=0.3,
-                            max_output_tokens=300,
-                        ),
-                    )
+                    elif provider == "gemini":
+                        from google.genai import types
+                        raw = client.models.generate_content(
+                            model=self._get_model(provider),
+                            contents=messages,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                tools=converted_tools,
+                                temperature=0.3,
+                                max_output_tokens=300,
+                            ),
+                        )
 
-                elif provider == "anthropic":
-                    kwargs = {
-                        "model": self._get_model(provider),
-                        "messages": messages,
-                        "max_tokens": 300,
-                    }
-                    if system_instruction:
-                        kwargs["system"] = system_instruction
-                    if converted_tools:
-                        kwargs["tools"] = converted_tools
-                    raw = client.messages.create(**kwargs)
+                    elif provider == "anthropic":
+                        kwargs = {
+                            "model": self._get_model(provider),
+                            "messages": messages,
+                            "max_tokens": 300,
+                        }
+                        if system_instruction:
+                            kwargs["system"] = system_instruction
+                        if converted_tools:
+                            kwargs["tools"] = converted_tools
+                        raw = client.messages.create(**kwargs)
 
-                return self._normalize_response(raw, provider)
+                    return self._normalize_response(raw, provider)
 
-            except Exception as e:
-                print(f"  [X] LLM call failed ({provider}): {e}")
-                continue
+                except Exception as e:
+                    err = str(e)
+                    if attempt < 2 and any(x in err for x in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "rate limit", "too many requests")):
+                        wait = 2 ** attempt
+                        print(f"  [~] {provider} busy (attempt {attempt+1}/3), retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    print(f"  [X] LLM call failed ({provider}): {e}")
+                    break
 
         return None
 
     def call_raw(self, messages: list[dict], tools: list | None = None, temp: float = 0.3, max_tokens: int = 1000) -> dict | None:
         providers = self._get_provider_order()
         for provider in providers:
-            try:
-                client = self._get_client(provider)
-                converted_messages, system_instruction = self._convert_messages(messages, provider)
-                converted_tools = self._convert_tools(tools, provider)
+            for attempt in range(3):
+                try:
+                    client = self._get_client(provider)
+                    converted_messages, system_instruction = self._convert_messages(messages, provider)
+                    converted_tools = self._convert_tools(tools, provider)
 
-                if provider == "openai":
-                    kwargs = {
-                        "model": self._get_model(provider),
-                        "messages": converted_messages,
-                        "max_tokens": max_tokens,
-                    }
-                    if converted_tools:
-                        kwargs["tools"] = converted_tools
-                    raw = client.chat.completions.create(**kwargs)
+                    if provider == "openai":
+                        kwargs = {
+                            "model": self._get_model(provider),
+                            "messages": converted_messages,
+                            "max_tokens": max_tokens,
+                        }
+                        if converted_tools:
+                            kwargs["tools"] = converted_tools
+                        raw = client.chat.completions.create(**kwargs)
 
-                elif provider == "gemini":
-                    from google.genai import types
-                    raw = client.models.generate_content(
-                        model=self._get_model(provider),
-                        contents=converted_messages,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_instruction,
-                            tools=converted_tools,
-                            temperature=temp,
-                            max_output_tokens=max_tokens,
-                        ),
-                    )
+                    elif provider == "gemini":
+                        from google.genai import types
+                        raw = client.models.generate_content(
+                            model=self._get_model(provider),
+                            contents=converted_messages,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_instruction,
+                                tools=converted_tools,
+                                temperature=temp,
+                                max_output_tokens=max_tokens,
+                            ),
+                        )
 
-                elif provider == "anthropic":
-                    kwargs = {
-                        "model": self._get_model(provider),
-                        "messages": converted_messages,
-                        "max_tokens": max_tokens,
-                    }
-                    if system_instruction:
-                        kwargs["system"] = system_instruction
-                    if converted_tools:
-                        kwargs["tools"] = converted_tools
-                    raw = client.messages.create(**kwargs)
+                    elif provider == "anthropic":
+                        kwargs = {
+                            "model": self._get_model(provider),
+                            "messages": converted_messages,
+                            "max_tokens": max_tokens,
+                        }
+                        if system_instruction:
+                            kwargs["system"] = system_instruction
+                        if converted_tools:
+                            kwargs["tools"] = converted_tools
+                        raw = client.messages.create(**kwargs)
 
-                return self._normalize_response(raw, provider)
+                    return self._normalize_response(raw, provider)
 
-            except Exception as e:
-                print(f"  [X] LLM call failed ({provider}): {e}")
-                continue
+                except Exception as e:
+                    err = str(e)
+                    if attempt < 2 and any(x in err for x in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED", "rate limit", "too many requests")):
+                        wait = 2 ** attempt
+                        print(f"  [~] {provider} busy (attempt {attempt+1}/3), retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    print(f"  [X] LLM call failed ({provider}): {e}")
+                    break
 
         return None
 
@@ -375,61 +390,6 @@ class LLMClient:
 
         if len(self.history) > self.MAX_HISTORY_EXCHANGES * 2:
             self.history = [self.history[0]] + self.history[-(self.MAX_HISTORY_EXCHANGES * 2 - 1):]
-        return reply
-
-    def chat_with_tools(self, user_input: str, tools: list[dict]) -> str:
-        from tools.registry import execute_tool
-
-        self.history.append({"role": "user", "content": user_input})
-
-        for _ in range(5):
-            response = self._chat(PROVIDER, tools)
-            if response is None:
-                reply = "[Error: Model unavailable]"
-                print(f"[X] {reply}")
-                self.history.pop()
-                return reply
-
-            message = response["message"]
-
-            if "tool_calls" not in message:
-                reply = message["content"]
-                self.history.append({"role": "assistant", "content": reply})
-                return reply
-
-            assistant_msg: dict = {"role": "assistant", "content": message.get("content", "")}
-            normalized_tc = []
-            for tc in message["tool_calls"]:
-                normalized_tc.append({
-                    "id": tc.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": tc["function"]["name"],
-                        "arguments": tc["function"]["arguments"]
-                    }
-                })
-            assistant_msg["tool_calls"] = normalized_tc
-            self.history.append(assistant_msg)
-
-            for tc in message["tool_calls"]:
-                name = tc["function"]["name"]
-                raw_args = tc["function"]["arguments"]
-                tool_call_id = tc.get("id", "")
-                if isinstance(raw_args, str):
-                    args = json.loads(raw_args)
-                else:
-                    args = raw_args
-
-                result = execute_tool(name, args)
-                self.history.append({
-                    "role": "tool",
-                    "content": str(result),
-                    "name": name,
-                    "tool_call_id": tool_call_id,
-                })
-
-        reply = "[Error: Too many tool call rounds]"
-        self.history.pop()
         return reply
 
     def stream_chat(self, messages: list[dict], temp: float = 0.3, max_tokens: int = 1000) -> Generator[str, None, None]:

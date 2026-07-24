@@ -15,7 +15,7 @@
 
 ---
 
-## Current Implementation (Phase B2 — BYOLLM + Cloud LLMs)
+## Current Implementation (Phase D — ReAct Agent Loop)
 
 ### Architecture
 ```
@@ -23,58 +23,54 @@
     -> Session starts, mic listens with VAD
     -> User speaks → pause 1.5s silence → VAD auto-submits turn
     -> RealtimeSTT transcribes (base, CUDA float16)
-    -> PLANNER (cloud LLM call): classifies intent, outputs JSON plan
-       - "chat" intent: short greeting → TTS
-       - "tool_request" intent: structured plan with tool steps
-    -> EXECUTOR: runs each tool step, collects results
-       - On tool error: re-plan with error context (1 retry)
-    -> SUMMARIZER (cloud LLM call, STREAMING): formats results token-by-token
-       - Strips metadata, tool names, internal details
-       - 1-2 natural sentences
+    -> run_agent() → ReAct loop (up to 6 steps):
+       1. THINK: LLM decides next tool or signals done
+       2. OBSERVE: execute_tool() runs the tool
+       3. REPEAT until done or MAX_STEPS reached
     -> StreamingSpeaker: accumulates tokens → splits on sentence boundaries
        → Kokoro TTS (int8, speed=1.15) → sounddevice plays sentence by sentence
+    -> Delivery: "speak" (TTS), "paste" (clipboard + paste at cursor), or "both"
 [CTRL+SHIFT+J] press again
     -> Session ends, mic stops, TTS stops
     -> Full session saved as one episodic memory
 ```
 
-### Three-Stage Agent Pipeline
+### ReAct Agent Pipeline
 
 ```
 User Input
     │
     ▼
-┌──────────────┐
-│   PLANNER    │  Cloud LLM call (temp=0.1) — outputs JSON plan
-│  (router.py) │  e.g. {"intent": "tool_request", "plan": [...]}
-└──────┬───────┘
-       │
-       ├── "chat" intent → direct reply → TTS
-       │
-       └── "tool_request" intent
-                │
-                ▼
-          ┌──────────────┐
-          │  EXECUTOR    │  Runs tools sequentially
-          │ (executor.py)│  Calls tools.registry.execute_tool()
-          └──────┬───────┘
-                 │
-                 ▼
-          ┌──────────────┐
-          │  SUMMARIZER  │  Cloud LLM call (temp=0.1) — formats for speech
-          │(summarizer.py)│  Strips noise, 1-2 clean sentences
-          └──────┬───────┘
-                 │
-                 ▼
-                TTS → spoken response
+┌──────────────────┐
+│  run_agent()     │  MAX_STEPS=6 hard cap
+│  ┌────────────┐  │
+│  │  think()   │──│── LLM call (temp=0.1) → JSON decision
+│  └─────┬──────┘  │     {"tool": "...", "args": {...}}
+│        │         │     or {"done": True, "answer": "...", "delivery": "speak"}
+│  ┌─────▼──────┐  │
+│  │exec_tool() │  │  tools.registry.execute_tool(name, args, llm)
+│  └─────┬──────┘  │
+│        │         │
+│  ┌─────▼──────┐  │
+│  │ observe    │  │  Step result appended → fed back to next think()
+│  └────────────┘  │
+└──────────────────┘
+        │
+        ▼
+   Streaming TTS → spoken response
 ```
+
+### Delivery Modes
+- **speak** — TTS via StreamingSpeaker
+- **paste** — clipboard + paste at cursor via paste_at_cursor tool
+- **both** — speak and paste simultaneously
 
 ### File Reference
 
 #### `config.py`
 - `HOTKEY = "ctrl+shift+j"` — Jarvis agent hotkey
 - `WHISPERFLOW_HOTKEY = "ctrl+shift+k"` — Pure STT mode hotkey
-- `ULTRA_HOTKEY = "ctrl+shift+u"` — Ultra mode hotkey
+- `MAX_STEPS = 6` — maximum ReAct loop iterations per turn
 - `STT_MODEL = "base"`
 - `STT_DEVICE = "cuda"` — GPU accelerated Whisper (no VRAM conflict)
 - `SAMPLE_RATE = 16000`
@@ -84,6 +80,8 @@ User Input
 - `OPENAI_MODEL / GEMINI_MODEL / ANTHROPIC_MODEL` — per-provider model selection
 - `AUTO_EXTRACT = True` — toggle async auto fact extraction after each turn
 - `REMINDER_CHECK_SECONDS = 30` — how often the background thread checks due reminders
+- `RETRIEVAL_GATE = True` — toggle the cheap LLM gate that decides if memories are needed before querying ChromaDB
+- `TRACING = True` — toggle always-on JSONL tracing to `.traces/<date>.jsonl`
 
 #### `audio/recorder.py`
 - Class: `Recorder`
@@ -105,7 +103,8 @@ User Input
 
 #### `llm/prompts.py`
 - `SYSTEM_PROMPT` — strict English, 1-2 sentences, no formatting, no "how can I help". Contains `{PROFILE}` placeholder replaced at init.
-- `ULTRA_SYSTEM_PROMPT` — content generation prompt for Ultra mode
+- `ULTRA_SYSTEM_PROMPT` — content generation prompt for generate_content tool
+- `AGENT_SYSTEM_PROMPT` — used by agent/loop.py think() for ReAct decision-making
 
 #### `llm/client.py`
 - Class: `LLMClient`
@@ -121,22 +120,53 @@ User Input
   - **Anthropic**: `input_schema` (renamed from `parameters`)
 - `_normalize_response(response, provider)` — converts each provider's response back to unified `{"message": {"content", "tool_calls": [...]}}` format
 - `_chat(tools=None)` — internal helper, dispatches to active provider. Uses `max_tokens=300`.
-- `call_raw(messages, tools=None, temp=0.3, max_tokens=1000)` — stateless LLM call. `max_tokens` is caller-configurable (planner/summarizer use default 1000, Ultra passes 2000).
+- `call_raw(messages, tools=None, temp=0.3, max_tokens=1000)` — stateless LLM call. Used by think() and generate_content.
+- `stream_chat(user_input) -> Generator[str, None, None]` — streaming chat, used as best-effort fallback when agent loop fails.
 - `chat(user_input)` — simple conversational chat. Trims history to last 20 exchanges to prevent unbounded growth.
-- `chat_with_tools(user_input, tools)` — tool-calling loop (up to 5 rounds). Now stores assistant `tool_calls` in history for OpenAI/Anthropic protocol compliance.
+- `chat_with_tools(user_input, tools)` — tool-calling loop (up to 5 rounds). Stores assistant `tool_calls` in history for OpenAI/Anthropic protocol compliance.
 - `refresh_memories(query)` — queries ChromaDB, injects relevant memories into system prompt
 - `rotate_session()` — summarizes current session, stores as episode, resets history
 - On model failure: returns error string, pops user message from history
+- Provider fallback chain: primary (config.PROVIDER) → fallback to providers with API keys
 
 #### `tts/speaker.py`
 - Class: `Speaker`
 - `__init__()` — loads `Kokoro("kokoro-v1.0.int8.onnx", "voices-v1.0.bin")`, voice `"af_bella"`
 - `speak(text: str)` — creates audio at speed=1.0, `sd.play()`, `sd.wait()`
 
+#### `agent/loop.py`
+- `run_agent(user_input, conversation_history, llm) -> dict` — main ReAct loop
+  - Calls `needs_memory()` once per turn to decide if ChromaDB retrieval is needed
+  - If gate says yes: queries top-5 semantic + top-3 episodic memories
+  - If gate says no: passes `"(none)"` — skips retrieval entirely
+  - Up to `MAX_STEPS` iterations
+  - Each iteration: think() → execute_tool() → append step
+  - On tool error: prints warning, error visible in steps context for agent to self-correct
+  - When done: returns `{"output": str, "delivery": "speak"|"paste"|"both", "stream": Generator|None, "gate_needed": bool}`
+  - On JSON parse failure: returns safe fallback message, logs raw text
+- `think(user_input, steps, conversation_history, llm, memories="(none)") -> dict` — LLM decision step
+  - Builds prompt from `SYSTEM_PROMPT`, `USER_PROMPT_FORMAT`, `TOOL_DESCRIPTIONS`
+  - Injects: user profile, passed memories string, current date, last 8 conversation turns, current step context
+  - Calls `llm.call_raw()` with system + user split (Gemini requirement)
+  - Extracts JSON via `_extract_json()` with markdown code block stripping
+  - Returns `{"tool": name, "args": {...}, "reason": "..."}` or `{"done": True, "answer": "...", "delivery": "..."}`
+- `_extract_json(raw: str) -> str` — strips ```json fences, extracts JSON block
+- `_format_steps(steps: list[dict]) -> str` — formats tool step context for prompt
+- `_stream_summarize(...) -> Generator` — streaming best-effort fallback via `llm.stream_chat()`
+
+#### `agent/prompts.py`
+- `SYSTEM_PROMPT` — base prompt with rules, tool list format, delivery mode instructions, profile, memories, conversation history placeholders
+- `USER_PROMPT_FORMAT` — step template for each tool call in the ReAct loop
+- `TOOL_DESCRIPTIONS` — formatted list of all 22 tools with names, param schemas, and descriptions
+
 #### `tools/registry.py`
-- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas (19 tools: includes `fetch_url`, `set_reminder`, `list_reminders`)
+- `TOOL_DEFINITIONS` — list of OpenAI-compatible function schemas (22 tools)
 - `TOOL_MAP` — dict mapping tool name string → callable function
-- `execute_tool(name, args) -> str` — dispatches to the registered function, returns result string or error
+- `execute_tool(name, args, llm=None) -> str` — dispatches to the registered function, returns result string or error. Special-cases `generate_content` to pass `llm`.
+- New tools:
+  - **read_screen()** — wraps `screen_ocr.capture_and_ocr()`, returns screen text
+  - **generate_content(instruction, screen_context="", llm=None)** — generates content (emails, code, letters) using `ULTRA_SYSTEM_PROMPT` + profile + semantic memories. Has `None` guard.
+  - **paste_at_cursor(text)** — copies text to clipboard via `pyperclip`, pastes at cursor via `pyautogui.hotkey("ctrl", "v")`
 
 #### `tools/geoip.py`
 - `get_city_info(ip="auto")` — if "auto", resolves current public IP via `api.ipify.org`, then looks up city/region/country from `data/GeoLite2-City.mmdb` via `geoip2`
@@ -189,37 +219,15 @@ User Input
 - `media_control(action)` — simulates media key presses via `keyboard.send()`
 - Actions: play, pause, next, previous, volume up, volume down, mute
 
-#### `agent/planner.py`
-- `create_plan(user_input, llm) -> dict` — intent router + planner
-- Uses a dedicated system prompt to classify user intent as `"chat"` or `"tool_request"`
-- Outputs a JSON plan: `{"intent": "...", "plan": [...], "message": "...", "confidence": 0.0-1.0}`
-- For `"chat"`: returns a brief friendly message directly (no tool calls)
-- For `"tool_request"`: returns a structured plan array of tool steps
-- For `"new_session"`: signals session rotation (start fresh / clear context)
-- Strips markdown code blocks from LLM output, parses JSON with fallback
-- Temperature=0.1 for deterministic JSON output
-- Injects user profile from `profile/profile.md` into prompt for personalization
-- Injects top-5 semantic + top-3 episodic memories from ChromaDB into prompt
-- Injects current date into prompt for time-aware queries
-- Injects last 8 conversation turns (up from 2) for better pronoun resolution
-- Includes `fetch_url` in tool descriptions for deep page content extraction
-- Plan includes `confidence` field — if < 0.6, Jarvis asks for confirmation
-- Multi-step chaining supported: search_web → fetch_url on best result
+#### `tools/screen_ocr.py`
+- `capture_and_ocr()` — takes full screenshot via `pyautogui`, OCRs via `winocr` (Windows native)
+- Returns extracted text string or `"[No text detected on screen]"` / `"[OCR error: ...]"`
+- Used by the `read_screen` tool in the ReAct loop
 
-#### `agent/executor.py`
-- `execute_plan(plan) -> list[dict]` — runs each tool step in sequence
-- Calls `tools.registry.execute_tool()` for each step
-- Returns list of `{"tool": name, "args": args, "result": str}` dicts
-- Prints progress: "[tool] → [result]" for each call
-
-#### `agent/summarizer.py`
-- `summarize(user_input, tool_results, llm) -> str` — formats tool results for TTS
-- Uses a dedicated system prompt to produce clean, natural speech
-- Rules: 1-2 sentences, exact numbers from data, no metadata/tool names, natural conversational tone
-- Temperature=0.1 to prevent hallucination (especially temperature/numbers)
-- Falls back to error message on failure
-- Injects user profile from `profile/profile.md` into system message for context
-- Injects top-3 semantic + top-2 episodic memories from ChromaDB into system message
+#### `tools/profile_loader.py`
+- `load_profile()` — reads `profile/profile.md` from project root
+- Returns the file content as a string, or empty string if file doesn't exist
+- Used by LLMClient, agent loop (think), and generate_content tool
 
 #### `modes/jarvis.py`
 - Class: `JarvisMode`
@@ -230,39 +238,22 @@ User Input
 - Mic pauses during processing + TTS, resumes after (no feedback loop)
 - Streaming TTS via `StreamingSpeaker` (token-by-token → sentence TTS)
 - Pipeline per turn:
-  1. `agent.planner.create_plan(text, llm)` → plan dict
-  2. If intent is "chat": use plan's message directly
-  3. If intent is "tool_request": `agent.executor.execute_plan(steps)` → results
-  4. If any tool errored: re-plan with error context (1 retry)
-  5. If streaming enabled: `agent.summarizer.stream_summarize()` → `streaming_speaker.speak_stream()`
-  6. If intent is "new_session": `llm.rotate_session()` → reset history
+  1. Check for "start fresh"/"new session" keywords → `llm.rotate_session()` → resume mic
+  2. `agent.loop.run_agent(text, conversation_history, llm)` → result dict
+  3. If `delivery` is "speak" or "both": stream or speak the output
+  4. If `delivery` is "paste" or "both": `execute_tool("paste_at_cursor", ...)`
+   5. If agent loop errors: fallback to `llm.chat()` with print + history save (fallback also gated by `needs_memory()`)
 - After response spoken: fires async `extract_and_store(text, llm)` in daemon thread (zero latency impact)
 - Stores conversation history as labeled `"User: ..."` / `"Assistant: ..."` pairs (not just user text) for accurate follow-up resolution
 - Session end: saves full session history as one episodic memory
-- Fallback to blocking `summarize()` + `speaker.speak()` if streaming fails
 
-#### `modes/ultra.py`
-- Class: `UltraMode`
-- `__init__(recorder, transcriber, llm)` — stores shared instances
-- `on_activate()` — starts recording
-- `on_release()` — stops recording, runs the full pipeline:
-  1. Screenshot + OCR via `tools.screen_ocr.capture_and_ocr()`
-  2. STT via `transcriber.transcribe()`
-  3. Profile context loaded via `tools.profile_loader.load_profile()`
-  4. Optional company search via `tools.web_search.search_web()`
-  5. LLM generation using `ULTRA_SYSTEM_PROMPT` with screen context + profile + user instruction
-  6. Copy to clipboard + paste at cursor via `pyperclip` + `pyautogui`
-- Press CTRL+SHIFT+U, speak your request, release → generated content appears at cursor
-- Works for emails, cover letters, code, summaries, documents — any writing task
-
-#### `tools/screen_ocr.py`
-- `capture_and_ocr()` — takes full screenshot via `pyautogui`, OCRs via `winocr` (Windows native)
-- Returns extracted text string or `"[No text detected on screen]"` / `"[OCR error: ...]"`
-
-#### `tools/profile_loader.py`
-- `load_profile()` — reads `profile/profile.md` from project root
-- Returns the file content as a string, or empty string if file doesn't exist
-- Used by LLMClient (chat system prompt), Planner, Summarizer, and Ultra mode to inject personal context
+#### `modes/whisperflow.py`
+- Class: `WhisperFlowMode`
+- `__init__(recorder, transcriber)` — stores shared instances
+- `on_activate()` — starts recording (no streaming, no terminal output)
+- `on_release()` — stops recording, transcribes full audio, copies to clipboard, `ctrl+a` + `ctrl+v` at cursor
+- No LLM, no TTS — press CTRL+SHIFT+K, speak, release → text appears
+- Streaming was attempted (SendInput KEYEVENTF_UNICODE, PostMessage WM_CHAR) but all methods fail during hotkey hold due to `WH_KEYBOARD_LL` hook interception. Final-paste-only is the current approach.
 
 #### `memory/store.py`
 - `MemoryStore` class — ChromaDB wrapper with two collections (`semantic`, `episodic`)
@@ -270,7 +261,7 @@ User Input
 - `query(collection, text, n)` — semantic search, returns content strings
 - `query_with_scores(collection, text, n)` — returns `[(doc, distance)]` tuples for dedup checking
 - `count(collection)` — returns document count (handles empty collection gracefully)
-- Module-level singleton `memory_store` for use by tools and planner
+- Module-level singleton `memory_store` for use by tools and agent loop
 
 #### `memory/session.py`
 - `summarize(llm, history)` — summarizes last 10 exchanges via LLM call
@@ -294,18 +285,22 @@ User Input
 - `mark_fired(reminder_id)` — marks reminder as fired
 - `list_pending()` / `format_pending()` — lists all pending reminders sorted by time
 
-#### `modes/whisperflow.py`
-- Class: `WhisperFlowMode`
-- `__init__(recorder, transcriber)` — stores shared instances
-- `on_activate()` — starts recording (no streaming, no terminal output)
-- `on_release()` — stops recording, transcribes full audio, copies to clipboard, `ctrl+a` + `ctrl+v` at cursor
-- No LLM, no TTS — press CTRL+SHIFT+K, speak, release → text appears
-- Streaming was attempted (SendInput KEYEVENTF_UNICODE, PostMessage WM_CHAR) but all methods fail during hotkey hold due to `WH_KEYBOARD_LL` hook interception. Final-paste-only is the current approach.
+#### `memory/retrieval_gate.py` — NEW (Phase E)
+- `needs_memory(user_input, llm) -> bool` — cheap fast classifier (one LLM call, temp=0, max_tokens=5)
+- Prompt: 5 examples (2+2→NO, meeting→YES, weather→NO, yesterday→YES, cover letter→YES)
+- Returns `True` if "yes" in response, `False` otherwise. `except` → `True` (safe default)
+- Config guard: skip if `RETRIEVAL_GATE = False` (always retrieve)
+
+#### `ops/tracer.py` — NEW (Phase E)
+- Always-on JSONL tracing to `.traces/<YYYY-MM-DD>.jsonl`
+- `trace(event, **data)` — appends one JSON line per call, wrapped in try/except (never crashes)
+- Events: `turn_start`, `gate`, `think`, `tool`, `final`, `turn_end`, `error`
+- Config guard: skip if `TRACING = False`
 
 #### `main.py`
 - Global instances: `Recorder`, `Transcriber`, `LLMClient`, `Speaker`
-- Three mode instances: `JarvisMode`, `WhisperFlowMode`, `UltraMode` — all with shared `Recorder`, `Transcriber`, `LLMClient`
-- Six hotkey registrations (press + release for each of three modes), all with `suppress=True`
+- Two mode instances: `JarvisMode`, `WhisperFlowMode` — shared `Recorder`, `Transcriber`, `LLMClient`
+- Four hotkey registrations (press + release for each of two modes), all with `suppress=True`
 - Starts `reminder_loop` daemon thread that checks `get_due_reminders()` every 30s, fires via TTS + plyer desktop notification
 - Call `keyboard.wait()` at end
 
@@ -326,9 +321,8 @@ User Input
 #### Mode Overview
 | Mode | Hotkey | Pipeline | Purpose |
 |---|---|---|---|
-| **Jarvis** | `CTRL+SHIFT+J` | Hotkey → Record → STT → Planner → Executor → Summarizer → TTS | Full assistant with tools |
+| **Jarvis** | `CTRL+SHIFT+J` | Hotkey → Record → STT → ReAct Agent Loop → TTS (or paste) | Full assistant with tools |
 | **WhisperFlow** (Type mode) | `CTRL+SHIFT+K` | Hotkey → Record → STT → Paste at cursor | Dictate text anywhere |
-| **Ultra** (Generate mode) | `CTRL+SHIFT+U` | Hotkey → Screenshot → Record → STT → OCR → Profile → LLM Gen → Paste | Generate emails, cover letters, code at cursor |
 
 ---
 
@@ -346,51 +340,6 @@ User Input
   - TTS speed: 1.3 → 1.5 (-0.5s)
 - Dependencies: `duckduckgo_search`, `geoip2`, `pyautogui` (Phase A)
 - `data/GeoLite2-City.mmdb` placed in `D:\Jarvis\data\`
-
-#### Agent Architecture (Plan → Execute → Summarize)
-```
-User speaks → STT → PLANNER (LLM → JSON plan)
-                        │
-              ┌─────────┴──────────┐
-              │                    │
-         "chat" intent     "tool_request" intent
-              │                    │
-              ▼                    ▼
-        Direct reply          EXECUTOR
-        (friendly msg)     (run tools seq)
-                                  │
-                                  ▼
-                            SUMMARIZER
-                            (LLM → clean speech)
-                                  │
-                                  ▼
-                                 TTS
-```
-
-#### Pipeline Details
-
-**Jarvis (QA pipeline)**
-```
-Planning:   LLM call with planner system prompt → {"intent": "...", "plan": [...]}
-            - "chat" intent: no tools needed, direct response
-            - "tool_request": structured plan with tool names + args
-
-Execution:  for each step in plan → tools.registry.execute_tool(name, args)
-            Results collected as list of {tool, args, result}
-
-Summarizer: LLM call with summarizer system prompt
-            Input: user question + tool results
-            Output: 1-2 clean sentences (no metadata, no tool names)
-```
-
-**Ultra (Generation pipeline)**
-```
-Screen capture: pyautogui.screenshot() → winocr.recognize_pil_sync()
-Profile load:   tools.profile_loader.load_profile() → reads profile/profile.md
-Search:         If company detected in instruction → search_web(company)
-Generation:     LLM call with ULTRA_SYSTEM_PROMPT + screen text + profile + user instruction
-Output:         Copy to clipboard → ctrl+v at cursor
-```
 
 ---
 
@@ -413,7 +362,8 @@ LLMClient
     ├── _convert_tools()        → OpenAI tool defs → provider tool format
     ├── _normalize_response()   → provider response → unified format
     ├── _chat()                 → dispatches to active provider
-    ├── call_raw()              → stateless call (planner, summarizer, ultra)
+    ├── call_raw()              → stateless call (think, generate_content)
+    ├── stream_chat()           → streaming chat (best-effort fallback)
     ├── chat()                  → conversational with history
     └── chat_with_tools()       → tool-calling loop (now stores assistant tool_calls in history)
 ```
@@ -427,9 +377,8 @@ LLMClient
 - Made `call_raw()` accept `max_tokens` parameter so each caller can set appropriate budget
 - Injected user profile (`profile/profile.md`) into:
   - **LLMClient chat system prompt** — all chat/chat_with_tools conversations have user context
-  - **Planner prompt** — personalized tool selection and routing
-  - **Summarizer system message** — context-aware response phrasing
-  - Ultra mode already had profile injection (unchanged)
+  - **Agent loop think()** — personalized tool selection and routing
+  - **generate_content tool** — content generation with user context
 - Added history trimming in `chat()` — caps at 20 exchanges to prevent unbounded growth
 - Fixed concurrency bug in all 3 modes: audio captured synchronously in `on_release`, passed to pipeline thread instead of having two competing `stop()` calls
 - TTS speed normalized: 1.5 → 1.0 (clear speech)
@@ -450,55 +399,26 @@ memory/
 memory_db/               # Auto-created by ChromaDB PersistentClient
 ```
 
-- **semantic_memory** — User facts and preferences, injected top-5 into planner + top-3 into summarizer
-- **episodic_memory** — Session summaries (on "start fresh" or shutdown), injected top-3 into planner + top-2 into summarizer
+- **semantic_memory** — User facts and preferences, injected top-5 into think() + top-3 into fallback chat
+- **episodic_memory** — Session summaries (on "start fresh" or shutdown), injected top-3 into think() + top-2 into fallback chat
 
 **Embedding:** ChromaDB `DefaultEmbeddingFunction` (all-MiniLM-L6-v2 via ONNX, 384-dim, bundled with chromadb, no external service)
 
 #### Storage Triggers
 
-1. **Explicit ("remember that X")** — Planner detects intent → calls `store_memory` tool → saves to semantic collection
-2. **"start fresh" / "new session"** — Planner outputs `new_session` intent → `LLMClient.rotate_session()` summarizes history → stores as episode → resets `self.history`
-3. **Shutdown** — `atexit` handler in `main.py` saves current session as episode (best-effort)
+1. **Explicit ("remember that X")** — Agent detects request → calls `store_memory` tool → saves to semantic collection
+2. **"start fresh" / "new session"** — `LLMClient.rotate_session()` summarizes history → stores as episode → resets `self.history`
+3. **Auto-extraction** — Background thread after each turn judges if user input contains a durable fact
+4. **Shutdown** — `atexit` handler in `main.py` saves current session as episode (best-effort)
 
 #### Memory Injection Points
 
 | Call Point | Where | What's Injected |
 |---|---|---|
-| Planner (`create_plan`) | `{MEMORIES}` in `PLANNER_PROMPT` | Top-5 semantic + top-3 episodic |
-| Chat (`llm.chat()`) | `self.history[0]` via `refresh_memories()` | Top-5 semantic + top-3 episodic |
+| Agent think() | System prompt | Top-5 semantic + top-3 episodic (gated by `needs_memory()`) |
+| Chat (`llm.chat()`) | `self.history[0]` via `refresh_memories()` | Top-5 semantic + top-3 episodic (gated in fallback) |
 | chat_with_tools | `self.history[0]` via `refresh_memories()` | Top-5 semantic + top-3 episodic |
-| Summarizer | System message | Top-3 semantic + top-2 episodic |
-| Ultra mode | No injection (generative, not retrieval-based) | — |
-
-#### New Tool: `store_memory`
-
-- **Name:** `store_memory`
-- **Params:** `content` (string) — the fact to remember
-- **Action:** Adds to `memory_store.semantic` collection with `type: "fact"` metadata
-- **Returns:** `"Remembered: {content}"`
-
-#### New Intent: `new_session`
-
-- Planner outputs `{"intent": "new_session", "plan": [], "message": ""}`
-- JarvisMode calls `llm.rotate_session()` which:
-  1. Summarizes current history via an LLM call
-  2. Stores summary in episodic collection
-  3. Resets `self.history` to fresh system prompt
-- Supported commands: "start fresh", "new session", "clear context", "forget everything"
-
-#### New Methods on LLMClient
-
-- `refresh_memories(query)` — Queries both collections, updates `self.history[0]` with relevant memories
-- `rotate_session()` — Summarizes + stores current session as episode, resets history
-
-#### Dependencies
-
-```
-chromadb                           # Already installed, added to requirements.txt
-```
-
-No Ollama, no sentence-transformers, no external embedding service.
+| generate_content | System prompt | Top-3 semantic |
 
 ---
 
@@ -511,38 +431,68 @@ No Ollama, no sentence-transformers, no external embedding service.
 - **Thread safety**: Added `threading.Lock` to `LLMClient._get_client()` for safe concurrent use from extraction thread.
 - **CUDA DLL fix**: `stream_stt.py` switched from PATH-based to `os.add_dll_directory()` for CUDA DLL registration.
 
-#### New Files
-```
-memory/
-├── extractor.py          # Async LLM-judge fact extraction
-└── reminders.py          # SQLite reminder store + queries
-reminders.db              # Auto-created SQLite file (gitignored)
-```
+---
 
-#### Modified Files
-| File | Change |
-|---|---|
-| `memory/store.py` | Added `query_with_scores()` for dedup |
-| `tools/registry.py` | Added `set_reminder` + `list_reminders` tools |
-| `agent/planner.py` | Added reminder + follow-up examples, consolidated search instructions |
-| `modes/jarvis.py` | Fires `extract_and_store()` async; stores `User:/Assistant:` pairs |
-| `main.py` | Starts `reminder_loop` daemon thread |
-| `config.py` | Added `AUTO_EXTRACT`, `REMINDER_CHECK_SECONDS` |
-| `requirements.txt` | Added `dateparser`, `plyer` |
-| `llm/client.py` | Added `threading.Lock` in `_get_client()` |
-| `stt/stream_stt.py` | Fixed CUDA DLL registration (`os.add_dll_directory`) |
+### Phase D — ReAct Agent Loop ✅ (Complete)
 
-#### Dependencies
+#### What was done
+- Replaced planner→executor→summarizer chain with autonomous ReAct agent loop
+- New files: `agent/loop.py` (run_agent, think, _extract_json, _stream_summarize), `agent/prompts.py` (SYSTEM_PROMPT, USER_PROMPT_FORMAT, TOOL_DESCRIPTIONS)
+- Deleted files: `modes/ultra.py`, `agent/planner.py`, `agent/executor.py`, `agent/summarizer.py`
+- Ultra mode abilities absorbed as tools: `read_screen()`, `generate_content()`, `paste_at_cursor()`
+- `config.py`: added `MAX_STEPS = 6`, removed `ULTRA_HOTKEY`
+- `main.py`: removed UltraMode, two modes (Jarvis + WhisperFlow)
+- All 20 existing tools preserved + 3 new tools = 22 total tools
+- `execute_tool(name, args, llm=None)` — now accepts optional `llm` parameter for generate_content
+- `llm/client.py`: added `stream_chat()` for best-effort fallback streaming
+- Agent loop features:
+  - JSON parse failure returns safe fallback message (logs raw text)
+  - Tool error visible in steps context for agent self-correction
+  - MAX_STEPS hard cap prevents infinite loops
+  - Delivery modes: speak, paste, both
+  - Provider fallback chain: primary → fallback based on API key presence
+- Bug fixes applied:
+  - Mic resume after "start fresh" in jarvis.py
+  - Print + history save in fallback except block in jarvis.py
+  - `llm=None` guard in generate_content (registry.py)
+  - Syntax error fix in loop.py (trailing `,jj`)
+
+#### ReAct Architecture
+
 ```
-dateparser      # Natural language time parsing for reminders
-plyer           # Desktop notifications for due reminders
+User Input
+    │
+    ▼
+┌──────────────────┐
+│  run_agent()     │  MAX_STEPS=6 hard cap
+│  ┌────────────┐  │
+│  │  think()   │──│── LLM call (temp=0.1) → JSON decision
+│  └─────┬──────┘  │     {"tool": "...", "args": {...}}
+│        │         │     or {"done": True, "answer": "...", "delivery": "speak"}
+│  ┌─────▼──────┐  │
+│  │exec_tool() │  │  tools.registry.execute_tool(name, args, llm)
+│  └─────┬──────┘  │
+│        │         │
+│  ┌─────▼──────┐  │
+│  │ observe    │  │  Step result appended → fed back to next think()
+│  └────────────┘  │
+└──────────────────┘
+        │
+        ▼
+   Streaming TTS → spoken response
 ```
 
 ---
 
-### Phase D — Packaging (Future)
+### Phase E — Retrieval Gate + JSONL Tracing ✅ (In Progress)
 
-### Phase D — Packaging (Future)
+#### What was done
+- **Retrieval Gate** (`memory/retrieval_gate.py`): Cheap fast LLM classifier (temp=0, max_tokens=5) that decides if a turn needs memory before querying ChromaDB. Saves latency when the turn is a simple query that doesn't need user context.
+- **Always-On JSONL Tracing** (`ops/tracer.py`): Fire-and-forget tracer that appends one JSON line per event to `.traces/<YYYY-MM-DD>.jsonl`. Events: `turn_start`, `gate`, `think`, `tool`, `final`, `turn_end`, `error`. Zero-setup, never crashes.
+- `config.py`: added `RETRIEVAL_GATE = True` and `TRACING = True` feature flags.
+- Both gated by feature flags — set to `False` to restore previous behavior.
+
+### Phase F — Packaging (Future)
 
 #### PyInstaller .exe Build
 - Only when agent features are stable
@@ -567,7 +517,7 @@ ddgs                         # Web search tool (Phase B)
 geoip2                      # GeoLite2-City.mmdb reader (Phase B)
 psutil                       # System info tool
 feedparser                   # News RSS tool
-winocr                       # Windows native OCR for Ultra mode
+winocr                       # Windows native OCR for screen reading tool
 google-genai                 # Gemini SDK v2.9.0 (Phase B2)
 openai                       # OpenAI SDK (Phase B2)
 anthropic                    # Anthropic SDK (Phase B2)
@@ -624,9 +574,12 @@ python main.py
 | WhisperFlow streaming blocked during hotkey hold | `keyboard` library's `suppress=True` creates `WH_KEYBOARD_LL` hook that intercepts injected input. Tried `SendInput`+`KEYEVENTF_UNICODE` and `PostMessage`+`WM_CHAR` — both fail during hook hold. Final-paste-only is the working approach. |
 | CUDA DLLs not found by ctranslate2 | `_add_cuda_dll_dirs()` registers paths via `os.add_dll_directory()` in `transcriber.py`. CUDA 12.x packages installed via pip (~1.2 GB in venv) |
 | Gemini free tier quota (20 req/day) | Quota resets ~24h. Use OpenAI or Anthropic for heavy testing, or upgrade to paid tier |
+| Gemini requires user-role message | `call_raw()` always sends system + user message pair for Gemini compatibility |
 | GeoIP db file missing | Path is `data/GeoLite2-City.mmdb`, ~63MB. Download from MaxMind (free reg) |
 | ChromaDB ONNX model download (79MB) | Auto-downloaded on first `MemoryStore()` init to `~/.cache/chroma/`. Required for DefaultEmbeddingFunction. |
 | PyInstaller + faster-whisper DLLs | Deferred. Models downloaded on first run, not bundled |
+| Retrieval gate adds ~1 LLM call per turn | Saves ChromaDB queries when gate says no — net neutral latency, better accuracy |
+| Tracing JSONL files grow unbounded | Each line ~200 bytes. At 100 turns/day, ~20KB/day. Manual cleanup if needed |
 
 ## Conventions
 - Imports: standard lib first, then third-party, then local
