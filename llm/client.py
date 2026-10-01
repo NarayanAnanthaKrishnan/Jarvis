@@ -2,9 +2,14 @@ import json
 import threading
 import time
 from collections.abc import Generator
+from dataclasses import dataclass
+from typing import Any
+
+import config
 from config import PROVIDER, OPENAI_API_KEY, OPENAI_MODEL, GEMINI_API_KEY, GEMINI_MODEL, ANTHROPIC_API_KEY, ANTHROPIC_MODEL
 from llm.prompts import SYSTEM_PROMPT
 from tools.profile_loader import load_profile
+from ops.tracer import trace
 
 
 _MODEL_MAP = {
@@ -14,8 +19,20 @@ _MODEL_MAP = {
 }
 
 
+@dataclass(frozen=True)
+class EmailModelProfile:
+    model: str
+    thinking_level: str
+    timeout_seconds: int
+    max_tokens: int
+
+
+class ModelRequestError(RuntimeError):
+    pass
+
+
 class LLMClient:
-    def __init__(self):
+    def __init__(self) -> None:
         profile = load_profile()
         system_content = SYSTEM_PROMPT.replace("{PROFILE}", f"User profile:\n{profile}" if profile else "")
         self.history = [{"role": "system", "content": system_content}]
@@ -227,6 +244,17 @@ class LLMClient:
             tool_calls = []
 
         result = {"message": {"content": content}}
+        if provider == "gemini":
+            candidates = getattr(response, "candidates", None)
+            reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        elif provider == "openai":
+            reason = getattr(response.choices[0], "finish_reason", None)
+        elif provider == "anthropic":
+            reason = getattr(response, "stop_reason", None)
+        else:
+            reason = None
+        if isinstance(reason, str):
+            result["finish_reason"] = reason
         if tool_calls:
             result["message"]["tool_calls"] = tool_calls
         return result
@@ -284,12 +312,67 @@ class LLMClient:
                         print(f"  [~] {provider} busy (attempt {attempt+1}/3), retrying in {wait}s...")
                         time.sleep(wait)
                         continue
-                    print(f"  [X] LLM call failed ({provider}): {e}")
+                    print(f"  [X] LLM call failed ({provider}): {type(e).__name__}")
                     break
 
         return None
 
-    def call_raw(self, messages: list[dict], tools: list | None = None, temp: float = 0.3, max_tokens: int = 1000) -> dict | None:
+    def _call_email(self, messages: list[dict], response_schema: dict | None) -> dict:
+        from google.genai import types
+
+        profile = EmailModelProfile(config.EMAIL_MODEL, config.EMAIL_THINKING_LEVEL,
+                                    config.EMAIL_MODEL_TIMEOUT_SECONDS, config.EMAIL_MODEL_MAX_TOKENS)
+        if not GEMINI_API_KEY:
+            raise ModelRequestError("The email model needs GEMINI_API_KEY configured.")
+        if profile.thinking_level not in {"low", "medium", "high"}:
+            raise ModelRequestError("Set EMAIL_THINKING_LEVEL to low, medium, or high.")
+        started = time.monotonic()
+        status = "error"
+        try:
+            client = self._get_client("gemini")
+            contents, system = self._convert_messages(messages, "gemini")
+            raw = client.models.generate_content(
+                model=profile.model, contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=system, temperature=1.0, max_output_tokens=profile.max_tokens,
+                    thinking_config=types.ThinkingConfig(thinking_level=profile.thinking_level.upper()),
+                    response_mime_type="application/json" if response_schema else None,
+                    response_json_schema=response_schema,
+                    http_options=types.HttpOptions(timeout=profile.timeout_seconds * 1000,
+                                                   retry_options=types.HttpRetryOptions(attempts=1)),
+                ),
+            )
+            result = self._normalize_response(raw, "gemini")
+            if not result.get("message", {}).get("content"):
+                raise ModelRequestError("The email model returned no usable response. Please retry the request.")
+            status = "complete"
+            return result
+        except ModelRequestError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            if code == 429:
+                message = "The email model reached its quota. Check Gemini billing or quota before retrying."
+            elif code in (401, 403, 404):
+                message = "The email model is unavailable for this account. Check EMAIL_MODEL and Gemini access."
+            elif "timeout" in type(exc).__name__.lower() or code == 504:
+                message = "The email model timed out. Please retry the request."
+            else:
+                message = "The email model could not complete the request. Check the connection and model configuration."
+            trace("error", where="email_model", model=profile.model, error_type=type(exc).__name__)
+            raise ModelRequestError(message) from exc
+        finally:
+            trace("model_call", agent_id="email", model=profile.model, status=status, elapsed_s=round(time.monotonic() - started, 3))
+
+    def call_raw(self, messages: list[dict], tools: list | None = None, temp: float = 0.3, max_tokens: int = 1000,
+                 *, profile: str = "general", response_schema: dict | None = None) -> dict | None:
+        if profile == "email":
+            if tools:
+                raise ValueError("Email decisions use structured output rather than SDK tool execution")
+            return self._call_email(messages, response_schema)
+        if profile != "general" or response_schema is not None:
+            raise ValueError("Unsupported model profile or response schema")
+        started = time.monotonic()
         providers = self._get_provider_order()
         for provider in providers:
             for attempt in range(3):
@@ -303,6 +386,7 @@ class LLMClient:
                             "model": self._get_model(provider),
                             "messages": converted_messages,
                             "max_tokens": max_tokens,
+                            "temperature": temp,
                         }
                         if converted_tools:
                             kwargs["tools"] = converted_tools
@@ -326,6 +410,7 @@ class LLMClient:
                             "model": self._get_model(provider),
                             "messages": converted_messages,
                             "max_tokens": max_tokens,
+                            "temperature": temp,
                         }
                         if system_instruction:
                             kwargs["system"] = system_instruction
@@ -333,6 +418,7 @@ class LLMClient:
                             kwargs["tools"] = converted_tools
                         raw = client.messages.create(**kwargs)
 
+                    trace("model_call", agent_id="general", model=self._get_model(provider), status="complete", elapsed_s=round(time.monotonic() - started, 3))
                     return self._normalize_response(raw, provider)
 
                 except Exception as e:
@@ -342,14 +428,19 @@ class LLMClient:
                         print(f"  [~] {provider} busy (attempt {attempt+1}/3), retrying in {wait}s...")
                         time.sleep(wait)
                         continue
-                    print(f"  [X] LLM call failed ({provider}): {e}")
+                    print(f"  [X] LLM call failed ({provider}): {type(e).__name__}")
                     break
 
         return None
 
     MAX_HISTORY_EXCHANGES = 20
 
-    def refresh_memories(self, query: str):
+    def reset_history(self) -> None:
+        profile = load_profile()
+        content = SYSTEM_PROMPT.replace("{PROFILE}", f"User profile:\n{profile}" if profile else "")
+        self.history = [{"role": "system", "content": content}]
+
+    def refresh_memories(self, query: str) -> None:
         from memory.store import memory_store
         semantic = memory_store.query("semantic", query, n=5)
         episodic = memory_store.query("episodic", query, n=3)
@@ -388,8 +479,8 @@ class LLMClient:
         reply = response["message"]["content"]
         self.history.append({"role": "assistant", "content": reply})
 
-        if len(self.history) > self.MAX_HISTORY_EXCHANGES * 2:
-            self.history = [self.history[0]] + self.history[-(self.MAX_HISTORY_EXCHANGES * 2 - 1):]
+        if len(self.history) > self.MAX_HISTORY_EXCHANGES * 2 + 1:
+            self.history = [self.history[0]] + self.history[-(self.MAX_HISTORY_EXCHANGES * 2):]
         return reply
 
     def stream_chat(self, messages: list[dict], temp: float = 0.3, max_tokens: int = 1000) -> Generator[str, None, None]:
@@ -434,6 +525,7 @@ class LLMClient:
                         "model": self._get_model(provider),
                         "messages": converted_messages,
                         "max_tokens": max_tokens,
+                        "temperature": temp,
                     }
                     if system_instruction:
                         kwargs["system"] = system_instruction
@@ -444,5 +536,5 @@ class LLMClient:
                     return
 
             except Exception as e:
-                print(f"  [X] Stream LLM call failed ({provider}): {e}")
+                print(f"  [X] Stream LLM call failed ({provider}): {type(e).__name__}")
                 continue

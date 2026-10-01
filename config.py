@@ -27,6 +27,10 @@ STT_STABILIZE_PARTIALS = 2
 SESSION_SILENCE_SECONDS = 1.5
 STREAMING_ENABLED = True
 SESSION_STT_MODEL = "tiny"
+TTS_MODEL = os.getenv("TTS_MODEL", "kokoro-v1.0.onnx")
+TTS_FALLBACK_MODEL = "kokoro-v1.0.int8.onnx"
+TTS_PRELOAD = os.getenv("TTS_PRELOAD", "true").lower() == "true"
+TTS_QUEUE_CHUNKS = 2
 
 PROVIDER = os.getenv("PROVIDER", "gemini")
 
@@ -45,3 +49,20 @@ PARALLEL_WORKERS = 5
 REFLECTION_ENABLED = False
 RETRIEVAL_GATE = True
 TRACING = True
+
+EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "false").lower() == "true"
+EMAIL_MODEL = os.getenv("EMAIL_MODEL", "gemini-3.8-flash")
+EMAIL_THINKING_LEVEL = os.getenv("EMAIL_THINKING_LEVEL", "low").lower()
+EMAIL_MODEL_TIMEOUT_SECONDS = 20
+EMAIL_MODEL_MAX_TOKENS = 4096
+EMAIL_TIMEZONE = os.getenv("EMAIL_TIMEZONE", "America/New_York")
+EMAIL_DB_PATH = os.path.join(os.path.dirname(__file__), "email_jobs.db")
+GOOGLE_OAUTH_CLIENT_FILE = os.getenv("GOOGLE_OAUTH_CLIENT_FILE", os.path.join(os.path.dirname(__file__), "gmail_client.json"))
+EMAIL_POLL_SECONDS = 5
+EMAIL_SEND_WINDOW_SECONDS = 60
+EMAIL_CONFIRM_SECONDS = 600
+JEV_ROUTING_ENABLED = os.getenv("JEV_ROUTING_ENABLED", "false").lower() == "true"
+TYPESAFE_API_KEY = os.getenv("TYPESAFE_API_KEY", "")
+JEV_MODEL = os.getenv("JEV_MODEL", "jev-latest")
+JEV_TIMEOUT_SECONDS = 2.0
+JEV_MIN_CONFIDENCE = 0.8

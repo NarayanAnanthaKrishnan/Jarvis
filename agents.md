@@ -1,6 +1,31 @@
 # Jarvis — AI Agent Reference
 
-## Project Overview
+## Implementation update — Gmail and Jev
+
+This section supersedes the historical implementation descriptions below. See `README.md` and `docs/email.md` for current setup and operation.
+
+- Email decisions and writing use the immutable `call_raw(profile="email", response_schema=...)` request profile: Gemini 3.8 Flash, low reasoning, 20-second timeout, 4,096-token ceiling and no transport retry/model fallback. General model settings remain independent.
+- `email_agent/contracts.py` supplies canonical tool descriptions, JSON schemas and pre-dispatch validation. Invalid arguments get one correction within the existing budget. Never log email argument values or exception messages that may contain provider payloads.
+- Local TTS defaults to full-precision Kokoro with an int8 fallback, background preloading, two queued chunks and one continuous output stream per response. Cancellation aborts playback and discards stale synthesis; the microphone resumes only after output drains. `ops/speech_check.py` benchmarks with Whisper loaded.
+- Hotkey callbacks only submit commands to `modes/controller.py` and return. They fire on release; recorder initialization, transcription, shutdown and session summarization must never run inside the keyboard hook.
+- Recorder loading can be cancelled before activation. Session turns run separately from the recorder control loop, and late callbacks retain their original cancellation identity. RealtimeSTT `abort()` is not used because it can wait indefinitely without an active transcription waiter.
+- `ops/audio_check.py` exercises the installed recorder with bundled PCM16 audio, both models, repeated turns, waiting/paused shutdown and process cleanup. Unit tests alone do not establish physical microphone/hotkey correctness. RealtimeSTT is pinned to the tested 1.0.2 lifecycle API.
+- `main.py --check-audio` verifies physical microphone chunks and both speech model startups through the production entrypoint. `sounddevice.RawInputStream` feeds PCM16 to RealtimeSTT only after initialization; the library's extra microphone process is disabled.
+- Keep application imports inside `main()` for Windows spawn. Import `winocr` only inside the screen-reading tool: importing it before ONNX Runtime caused DLL initialization failures and Whisper worker crashes on the target machine.
+- `stt/recorder_runtime.py` supervises the pinned recorder's initialization and releases its readiness wait on cancellation, worker exit or a 60-second timeout, then cleans up partial resources.
+
+- STT currently uses CPU, `tiny` for Jarvis sessions and `base` for dictation; this configuration is intentionally retained.
+- `agent/context.py` holds cancellation, session identity, draft state and one shared six-step budget. `agent/specs.py` defines general/email tool permissions. One general-to-email handoff is allowed per turn.
+- `agent/router.py` uses the official TypeSafe SDK with Choice and Noul. Jev routing is optional, disabled by default, with a two-second timeout and conservative fallback.
+- `email_agent/` implements Gmail Desktop OAuth, Windows Credential Manager storage, plain text drafts, separate voice approvals, SQLite scheduling, delivery recovery and a CLI. The worker has no STT/TTS/LLM dependencies at startup.
+- Send and schedule require a complete terminal preview and a later exact `Confirm email <action ID>` utterance. Approval is enforced outside model tools and expires with the session or after ten minutes.
+- The local worker polls every five seconds; jobs beyond a 60-second delivery window become missed. Unknown delivery outcomes are never automatically retried. Revisions and approved snapshots are checked before sending.
+- `tts/playback.py` owns shared synchronous, cancellable audio. The microphone remains paused until playback completes. Both modes share one recorder with explicit ownership and shutdown.
+- `modes/jarvis.py` owns conversation history and saves it once. Email turns are excluded from automatic extraction and session summaries.
+- `ops/tracer.py` records metadata to rotating files; `ops/logging_setup.py` bounds new application logs. Historical logs are retained.
+- `tests/` exercises email workflow, confirmations, scheduler recovery, routing/tool permissions, SDK contracts, audio cancellation and session lifecycle using fakes. Gmail/Jev credentials and an interactive Windows session are required for live acceptance checks.
+
+## Project Overview (historical reference)
 - **What:** Personal AI assistant — press hotkey, speak, get spoken response
 - **Hardware:** GTX 1650 (4GB VRAM), 8GB RAM, Windows
 - **LLM:** Cloud BYOLLM (Gemini / OpenAI / Anthropic) via SDK. No local models.

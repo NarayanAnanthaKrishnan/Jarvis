@@ -17,12 +17,12 @@ def read_notes(last_n: int = 5) -> str:
     if not NOTES_PATH.exists():
         return "No notes found."
     with open(NOTES_PATH, "r", encoding="utf-8") as f:
-        lines = [l.rstrip("\n") for l in f if l.strip()]
+        lines = [(index, line.rstrip("\n")) for index, line in enumerate(f, 1) if line.strip()]
     if not lines:
         return "No notes found."
     if last_n > 0:
         lines = lines[-last_n:]
-    numbered = [f"{i+1}. {line}" for i, line in enumerate(lines)]
+    numbered = [f"{index}. {line}" for index, line in lines]
     return "\n".join(numbered)
 
 

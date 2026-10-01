@@ -1,5 +1,5 @@
 faster-whisper
-realtimestt
+realtimestt==1.0.2
 nvidia-cublas-cu12
 nvidia-cuda-runtime-cu12
 nvidia-cudnn-cu12
@@ -23,3 +23,12 @@ requests
 beautifulsoup4
 dateparser
 plyer
+pyperclip
+google-api-python-client
+google-auth
+google-auth-httplib2
+google-auth-oauthlib
+keyring
+tzdata
+typesafe-sdk==0.7.2
+silero-vad

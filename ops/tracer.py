@@ -1,29 +1,34 @@
 import json
-import os
+import logging
+import threading
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Any
 
 from config import TRACING
 
-TRACE_DIR = Path(os.path.dirname(os.path.abspath(__file__))).parent / ".traces"
+
+TRACE_DIR = Path(__file__).resolve().parent.parent / ".traces"
+_LOCK = threading.Lock()
+_HANDLER: RotatingFileHandler | None = None
+_FIELDS = frozenset({"turn_id", "step", "steps", "agent_id", "confidence", "source", "fallback_reason", "model", "elapsed_s", "needs_memory", "name", "status", "where", "error_type", "error_code", "draft_id", "job_id", "attempt", "output_chars", "finish_reason", "time_present", "time_parse", "time_source"})
 
 
-def _ensure_dir():
-    try:
-        TRACE_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-
-def trace(event: str, **data) -> None:
+def trace(event: str, **data: Any) -> None:
+    global _HANDLER
     if not TRACING:
         return
     try:
-        _ensure_dir()
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        path = TRACE_DIR / f"{date_str}.jsonl"
-        record = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **data}
-        with open(str(path), "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with _LOCK:
+            TRACE_DIR.mkdir(parents=True, exist_ok=True)
+            path = TRACE_DIR / "events.jsonl"
+            if _HANDLER is None or Path(_HANDLER.baseFilename) != path.resolve():
+                if _HANDLER is not None:
+                    _HANDLER.close()
+                _HANDLER = RotatingFileHandler(path, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+            record = {"ts": datetime.now(timezone.utc).isoformat(), "event": event,
+                      **{key: value for key, value in data.items() if key in _FIELDS}}
+            _HANDLER.emit(logging.LogRecord("jarvis.trace", logging.INFO, "", 0, json.dumps(record, ensure_ascii=False), (), None))
     except Exception:
         pass

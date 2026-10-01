@@ -1,3 +1,15 @@
+import json
+import logging
+import traceback
+
+import pyautogui
+import pyperclip
+
+from agent.context import TurnContext
+from email_agent.models import EmailError, EmailResult
+from email_agent.contracts import safe_key
+from llm.client import ModelRequestError
+from llm.prompts import ULTRA_SYSTEM_PROMPT
 from tools.web_search import search_web, fetch_url
 from tools.geoip import get_city_info
 from tools.weather import get_weather
@@ -11,20 +23,17 @@ from tools.clipboard_tool import read_clipboard
 from tools.news import get_news
 from tools.media import media_control
 from tools.screen_ocr import capture_and_ocr
-from memory.store import memory_store
-from memory.reminders import add_reminder, parse_when, format_pending
-from llm.prompts import ULTRA_SYSTEM_PROMPT
 from tools.profile_loader import load_profile
-import pyperclip
-import pyautogui
 
 
 def store_memory(content: str) -> str:
+    from memory.store import memory_store
     memory_store.add("semantic", content, metadata={"type": "fact"})
     return f"Remembered: {content}"
 
 
 def set_reminder(message: str, when: str) -> str:
+    from memory.reminders import add_reminder, parse_when
     fire_at = parse_when(when)
     if fire_at is None:
         return f"Could not parse time: '{when}'. Try something like '3pm tomorrow' or 'in 20 minutes'."
@@ -32,6 +41,7 @@ def set_reminder(message: str, when: str) -> str:
 
 
 def list_reminders() -> str:
+    from memory.reminders import format_pending
     return format_pending()
 
 
@@ -95,7 +105,46 @@ TOOL_MAP = {
 }
 
 
-def execute_tool(name: str, args: dict, llm=None) -> str:
+READ_ONLY_TOOLS = frozenset({"search_web", "fetch_url", "get_city_info", "get_weather", "get_datetime", "calculate", "read_notes", "get_system_info", "read_clipboard", "get_news", "list_reminders", "read_screen", "email_get", "email_list"})
+EMAIL_TOOLS = frozenset({"email_draft", "email_get", "email_recipients", "email_prepare", "email_list", "email_cancel"})
+GENERAL_TOOLS = frozenset(TOOL_MAP) | {"handoff_email"}
+
+
+def execute_tool(name: str, args: dict, llm=None, context: TurnContext | None = None, parallel: bool = False) -> str | EmailResult:
+    if not isinstance(args, dict) or not isinstance(name, str):
+        return "Error: Tool name and arguments have invalid types"
+    allowed = EMAIL_TOOLS | {"get_datetime"} if context and context.agent_id == "email" else GENERAL_TOOLS
+    if name not in allowed:
+        return "Error: Tool is not available to this agent"
+    if parallel and name not in READ_ONLY_TOOLS:
+        return "Error: Only read-only tools can run in parallel"
+    if context:
+        context.check_active()
+    if name in EMAIL_TOOLS:
+        if context is None:
+            return "Error: Email requires an active session"
+        context.email_touched = True
+        try:
+            from email_agent.runtime import execute_email
+            key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+            if name not in READ_ONLY_TOOLS and key in context.mutation_results:
+                return context.mutation_results[key]
+            result = execute_email(name, args, context, llm)
+            if name not in READ_ONLY_TOOLS and result.status != "invalid_arguments":
+                context.mutation_results[key] = result
+            return result
+        except InterruptedError:
+            raise
+        except EmailError as exc:
+            return EmailResult("error", str(exc))
+        except ModelRequestError as exc:
+            return EmailResult("error", str(exc))
+        except Exception as exc:
+            logging.getLogger("jarvis.email").error("Email failure: turn=%s operation=%s stage=%s type=%s argument_types=%s frames=%s",
+                context.turn_id, name, context.email_stage, type(exc).__name__,
+                {safe_key(key): type(value).__name__ for key, value in args.items()},
+                [(frame.filename, frame.lineno, frame.name) for frame in traceback.extract_tb(exc.__traceback__)])
+            return EmailResult("error", f"Email operation could not complete ({type(exc).__name__}). Check email status before retrying.")
     fn = TOOL_MAP.get(name)
     if fn is None:
         return f"Error: Unknown tool '{name}'"
@@ -106,6 +155,12 @@ def execute_tool(name: str, args: dict, llm=None) -> str:
                 screen_context=args.get("screen_context", ""),
                 llm=llm
             )
-        return fn(**args)
+        key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+        if context and name not in READ_ONLY_TOOLS and key in context.mutation_results:
+            return context.mutation_results[key]
+        result = fn(**args)
+        if context and name not in READ_ONLY_TOOLS:
+            context.mutation_results[key] = result
+        return result
     except Exception as e:
         return f"Error executing {name}: {e}"

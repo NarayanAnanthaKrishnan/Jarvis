@@ -11,7 +11,8 @@ class WhisperFlowMode:
         self.active: bool = False
         self._typed_words: int = 0
         self._last_partials: list[list[str]] = []
-        self._type_lock: threading.Lock = threading.Lock()
+        self._type_lock = threading.RLock()
+        self._cancelled = threading.Event()
 
     def toggle(self) -> None:
         if not self.active:
@@ -19,15 +20,33 @@ class WhisperFlowMode:
         else:
             self._stop()
 
-    def _start(self) -> None:
-        self.active = True
-        self._typed_words = 0
-        self._last_partials = []
-        self.stream_stt.set_realtime_callback(self._on_partial)
-        self.stream_stt.start()
+    def _start(self, cancelled: threading.Event | None = None) -> None:
+        if self.stream_stt.owner is not None:
+            raise RuntimeError("Microphone is busy. End the Jarvis session first.")
+        with self._type_lock:
+            self._cancelled = cancelled or threading.Event()
+            token = self._cancelled
+            self.active = True
+            self._typed_words = 0
+            self._last_partials = []
+        self.stream_stt.set_realtime_callback(lambda text: self._on_partial(text, token))
+        try:
+            self.stream_stt.start(cancelled=self._cancelled)
+            if self._cancelled.is_set():
+                self.stream_stt.shutdown()
+                raise InterruptedError("Activation cancelled")
+        except Exception:
+            self.active = False
+            self.stream_stt.set_realtime_callback(None)
+            raise
 
-    def _on_partial(self, text: str) -> None:
-        if not self.active:
+    def _on_partial(self, text: str, token: threading.Event | None = None) -> None:
+        with self._type_lock:
+            if token is None or token is self._cancelled:
+                self._type_partial(text)
+
+    def _type_partial(self, text: str) -> None:
+        if not self.active or self._cancelled.is_set():
             return
 
         cols = get_terminal_size().columns
@@ -48,8 +67,9 @@ class WhisperFlowMode:
             to_type = (" " if self._typed_words > 0 else "") + " ".join(new_words)
             if to_type:
                 with self._type_lock:
-                    pyautogui.typewrite(to_type, interval=0.0)
-                self._typed_words = stable_count
+                    if self.active and not self._cancelled.is_set():
+                        pyautogui.typewrite(to_type, interval=0.0)
+                        self._typed_words = stable_count
 
     def _get_stable_word_count(self) -> int:
         min_len = min(len(w) for w in self._last_partials)
@@ -60,12 +80,16 @@ class WhisperFlowMode:
         return min_len
 
     def _stop(self) -> None:
-        self.active = False
+        with self._type_lock:
+            self.active = False
         print()
         self.stream_stt.set_realtime_callback(None)
+        if self._cancelled.is_set():
+            self.stream_stt.shutdown()
+            return
         self.stream_stt.stop()
         final_text = self.stream_stt.text()
-        if not final_text:
+        if not final_text or self._cancelled.is_set():
             return
 
         final_words = final_text.split()
@@ -73,6 +97,7 @@ class WhisperFlowMode:
             remainder = " ".join(final_words[self._typed_words:])
             prefix = " " if self._typed_words > 0 else ""
             with self._type_lock:
-                pyautogui.typewrite(prefix + remainder, interval=0.0)
+                if not self._cancelled.is_set():
+                    pyautogui.typewrite(prefix + remainder, interval=0.0)
 
         print(f"✅ Dictation complete ({len(final_words)} words)")

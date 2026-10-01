@@ -1,5 +1,3 @@
-from memory.store import memory_store
-
 SESSION_PROMPT = """Summarize this conversation in 1-2 sentences for future retrieval.
 Focus on key topics, decisions, and user preferences mentioned.
 
@@ -10,8 +8,8 @@ Summary:"""
 
 
 def summarize(llm, history: list[dict]) -> str:
-    user_msgs = [m["content"] for m in history if m["role"] in ("user", "assistant")]
-    text = "\n".join(user_msgs[-10:])
+    user_msgs = [f"{m['role'].title()}: {m['content']}" for m in history if m["role"] in ("user", "assistant")]
+    text = "\n".join(user_msgs)
     if not text.strip():
         return ""
     prompt = SESSION_PROMPT.replace("{HISTORY}", text)
@@ -25,7 +23,8 @@ def summarize(llm, history: list[dict]) -> str:
     return response["message"]["content"].strip()
 
 
-def save_session(llm, history: list[dict]):
+def save_session(llm, history: list[dict]) -> str:
+    from memory.store import memory_store
     summary = summarize(llm, history)
     if summary:
         memory_store.add("episodic", summary, metadata={"type": "session"})

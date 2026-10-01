@@ -14,7 +14,8 @@ voices-v1.0.bin
 data/GeoLite2-City.mmdb
 
 # Environment variables (API keys, secrets)
-.env
+.env*
+!.env.example
 
 # Personal data
 notes.txt
@@ -50,3 +51,16 @@ out.txt
 
 # Trace files (daily JSONL traces contain full transcript)
 .traces/
+email_jobs.db*
+email_worker.lock
+email_worker_status.json
+email_worker_status.tmp
+gmail_client.json
+client_secret*.json
+.pytest_cache/
+.logs/
+.test_runs/
+pytest-cache-files-*/
+.gmail_connection.json
+.gmail_connection.tmp
+codex-session-*.md

@@ -1,132 +1,141 @@
 # Jarvis — Personal AI Assistant
 
-Voice assistant with two modes: full agent (CTRL+SHIFT+J) and dictation (CTRL+SHIFT+K).
-Uses cloud LLMs (BYOLLM) — no local GPU needed for inference.
-
-## Project Structure
-
-```
-D:\Jarvis\
-├── main.py                 # Entry point — registers hotkeys, reminder scheduler
-├── config.py               # Hotkeys, STT settings, LLM provider config, feature flags
-├── modes/
-│   ├── jarvis.py           # Agent mode: orchestrates ReAct loop + async extraction
-│   └── whisperflow.py      # Dictation mode: record → STT → paste at cursor
-├── agent/
-│   ├── __init__.py
-│   ├── loop.py             # ReAct agent loop (think → execute → observe)
-│   └── prompts.py          # System prompts for ReAct loop and reflection
-├── audio/
-├── stt/
-│   └── stream_stt.py       # RealtimeSTT streaming session recorder
-├── llm/
-│   ├── client.py           # BYOLLM client — supports OpenAI / Gemini / Anthropic
-│   └── prompts.py          # System prompts (chat, ultra)
-├── tts/
-│   ├── speaker.py          # Kokoro ONNX TTS (int8, speed=1.15)
-│   └── stream_tts.py       # Streaming TTS token-by-token
-├── tools/
-│   ├── __init__.py
-│   ├── registry.py         # Tool map + dispatch (22 tools)
-│   ├── geoip.py            # GeoLite2-City.mmdb lookup
-│   ├── weather.py          # wttr.in weather query (auto-location support)
-│   ├── web_search.py       # DuckDuckGo search via ddgs
-│   ├── calculator.py       # Safe math expression evaluator
-│   ├── datetime_tool.py    # Current date/time
-│   ├── app_launcher.py     # Launch Windows apps
-│   ├── notes.py            # Take/read/update/delete notes
-│   ├── system_info.py      # CPU/RAM/disk usage
-│   ├── browser.py          # Open URLs or bookmarks
-│   ├── clipboard_tool.py   # Read clipboard contents
-│   ├── news.py             # RSS news headlines
-│   ├── media.py            # Media playback controls
-│   ├── screen_ocr.py       # Screen capture + OCR
-│   └── profile_loader.py   # Load user profile
-├── memory/
-│   ├── __init__.py
-│   ├── store.py            # ChromaDB wrapper (semantic + episodic collections)
-│   ├── session.py          # Session summarizer + save helper
-│   ├── extractor.py        # Async LLM-judge fact extraction
-│   ├── reminders.py        # SQLite reminder store
-│   └── retrieval_gate.py   # Cheap gate before memory retrieval
-├── ops/
-│   ├── __init__.py
-│   └── tracer.py           # Always-on JSONL tracing
-├── profile/
-│   └── profile.md          # Your personal context (gitignored)
-├── data/
-│   └── GeoLite2-City.mmdb  # MaxMind GeoIP database (gitignored)
-├── memory_db/              # ChromaDB vector database (auto-created, gitignored)
-├── reminders.db            # SQLite reminder database (auto-created, gitignored)
-├── .traces/                # Daily JSONL trace files (auto-created, gitignored)
-├── requirements.txt
-├── agents.md               # Full development plan & reference
-└── README.md
-```
+Windows voice assistant with a general agent, a Gmail specialist, and optional Jev routing. Uses cloud LLMs through Gemini, OpenAI or Anthropic. Python 3.12.
 
 ## Setup
 
+Run PowerShell as Administrator for the keyboard hooks. Work directly in `D:\Jarvis`.
+
 ```powershell
-# 1. Create & activate virtual environment
 python -m venv jarvis-env
-.\jarvis-env\Scripts\activate
+.\jarvis-env\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
 
-# 2. Install dependencies (CUDA 12.x DLLs bundled via pip — ~1.2 GB)
-pip install -r requirements.txt
+For a new installation, copy `.env.example` to `.env` and enter your LLM provider key. For an existing installation, merge the new settings into `.env` without replacing its keys.
 
-# 3. Set your API key in .env (not config.py)
-#    PROVIDER=gemini
-#    GEMINI_API_KEY=your-key-here
+Place `kokoro-v1.0.onnx` and `voices-v1.0.bin` in the project root. The speech engine falls back to `kokoro-v1.0.int8.onnx` if the full model is absent. The GeoIP tool also needs `data/GeoLite2-City.mmdb`. Whisper and Chroma embedding models may download on first use.
 
-# 4. Make sure model files are in D:\Jarvis\
-#    - kokoro-v1.0.int8.onnx
-#    - voices-v1.0.bin
-#    - data/GeoLite2-City.mmdb
-
-# 5. Run terminal as Administrator
-
-# 6. Start Jarvis
+```powershell
 python main.py
 ```
 
+Current STT defaults are CPU with `tiny` for voice sessions and `base` for dictation. Kokoro uses CPU at speed 1.15. It preloads after Jarvis starts listening and prepares upcoming audio during playback. The full model uses more RAM but synthesized substantially faster than int8 on the target machine. Set `TTS_MODEL=kokoro-v1.0.int8.onnx` to select the smaller model, or `TTS_PRELOAD=false` to load speech on the first response.
+
 ## Usage
 
-| Mode | Hotkey | Pipeline | What it does |
-|---|---|---|---|
-| **Jarvis** (Agent) | Press CTRL+SHIFT+J | ReAct loop → tools → TTS/paste | Full assistant with 22 tools |
-| **WhisperFlow** (Dictation) | Press CTRL+SHIFT+K | Record → STT → Paste at cursor | Transcribe speech to text anywhere |
+| Mode | Hotkey | Behavior |
+|---|---|---|
+| Jarvis | CTRL+SHIFT+J | Toggle a conversation; a pause in speech submits each turn |
+| WhisperFlow | CTRL+SHIFT+K | Toggle dictation and type the transcription at the cursor |
 
-### Jarvis Agent Pipeline
-1. **VAD** — voice activity detection auto-submits turn after 1.5s silence
-2. **Gate** — cheap LLM call decides if memory retrieval is needed
-3. **ReAct Loop** — up to 6 iterations of think (LLM) → execute tool → observe result
-4. **Delivery** — speak via TTS, paste at cursor, or both
-5. **Extraction** — background async fact extraction after each turn
+The microphone stays paused while Jarvis processes or speaks. The two modes share one recorder. Say “start fresh” to save the current conversation and clear its context.
 
-### Available Tools (22 tools)
-- **search_web(query, num_results)** — Search the web via DuckDuckGo
-- **fetch_url(url)** — Fetch full page text from a URL
-- **get_city_info(ip)** — GeoIP lookup from IP address
-- **get_weather(city, days)** — Current weather or forecast
-- **get_datetime()** — Current date and time
-- **calculate(expression)** — Safe math evaluation
-- **open_app(app_name)** — Launch desktop apps
-- **take_note(note)** / **read_notes(last_n)** / **update_note(index, content)** / **delete_note(index)** — Notes management
-- **store_memory(content)** — Remember a fact or preference
-- **get_system_info()** — CPU, RAM, disk usage
-- **open_url(url)** — Open URL or named bookmark
-- **read_clipboard()** — Read clipboard contents
-- **get_news(topic)** — Top headlines (general, tech, science, us)
-- **media_control(action)** — Play/pause/next/volume
-- **set_reminder(message, when)** — Set a timed reminder with natural language
-- **list_reminders()** — Show all pending reminders
-- **read_screen()** — OCR text from screen
-- **generate_content(instruction, screen_context)** — Draft emails, code, letters
-- **paste_at_cursor(text)** — Paste generated content at cursor
+Hotkeys toggle once when released. Speech model loading runs in a separate controller; wait for “Session started” or “Listening” before speaking. The first activation can take several seconds. Toggle the same hotkey again during loading to cancel activation. End the current mode before starting the other one.
 
-## Key Rules
-- STT runs on CUDA (GPU), LLM is cloud — no local GPU conflict
-- Terminal must run as Administrator
-- Python 3.12
-- No comments in code
-- Type hints on all function signatures
+General tools cover web research, weather, notes, reminders, memory, screen reading, content generation, clipboard delivery and desktop controls.
+
+## Gmail agent
+
+**[Connect Gmail and configure scheduling](docs/email.md)** before enabling email. Gmail and Jev are disabled by default.
+
+Supported requests include:
+
+- “Draft an email to alex@example.com asking to meet tomorrow.”
+- “Make that draft shorter.”
+- “Send draft one.”
+- “Schedule draft one for tomorrow at 9 AM.”
+- “List my scheduled emails.”
+- “Cancel email action two.”
+- “Reschedule draft one for Friday at 2 PM.”
+
+Drafts are saved in Gmail. Sending and scheduling require a full terminal preview followed by a separate utterance: **“Confirm email [action number].”** Confirmations expire after ten minutes or when the session ends. A draft ID identifies the message; an action ID identifies a send or schedule request.
+
+Email planning and writing use a dedicated Gemini profile: `EMAIL_MODEL=gemini-3.8-flash` and `EMAIL_THINKING_LEVEL=low`, using `GEMINI_API_KEY`. Routine requests retain their configured model. Email calls use structured output, a 20-second timeout and a 4,096-token output ceiling; account access and quota errors are reported without silently switching models. Arguments are validated before Gmail access, with one correction attempt for malformed tool calls. Missing recipients or scheduling times are clarified before delivery approval.
+
+Start with just the purpose: “Schedule an email asking Alex about a software role.” Jarvis saves a useful draft, asks for the address, then asks for the time. Short replies such as “alex@example.com” and “tomorrow at 9 AM” continue the same draft. Recipient changes preserve its subject and body. Missing optional details do not block drafting; unclear addresses are left for clarification. The pending action stays in the current session; saved Gmail drafts remain available after a restart by draft ID.
+
+Scheduling uses a separate Windows worker and SQLite state. Keep the PC awake, online and logged in. The worker runs without the voice app. Jobs more than 60 seconds overdue become `missed` and require a new time and confirmation.
+
+Version one supports one Gmail account and plain text messages, with To/Cc/Bcc. Inbox search, reply threads, attachments, HTML, aliases and contact lookup are outside this version.
+
+## Routing and execution
+
+```mermaid
+flowchart TD
+    U[User utterance] --> C{Exact email confirmation?}
+    C -->|Yes| A[Application validates displayed action and session]
+    C -->|No| R[Optional Jev route and memory decision]
+    R --> G[General agent]
+    R --> E[Email specialist]
+    G -->|One handoff| E
+    E --> D[Gmail draft or action preview]
+    A --> S[Immediate delivery or persistent schedule]
+```
+
+Jev classifies intent; the email model writes and plans email work. When Jev is disabled or unavailable, clear email requests and pending address/time replies route directly to the specialist. Mixed requests and other uncertain requests use the general agent, which can gather context and hand off. Both agents share one six-step budget. Malformed decisions get one repair attempt within that budget before any tool execution. Tool permissions are enforced by the dispatcher, and only read operations can run in parallel. Models cannot confirm sends.
+
+## Development and checks
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m pip check
+python -m email_agent --help
+```
+
+Tests use synthetic messages, fake providers and temporary databases. They cover confirmations, duplicate prevention, scheduling, recovery after interrupted delivery, routing, SDK contracts, audio cancellation and session lifecycle. They do not send live mail or use paid model calls.
+
+Optional email checks:
+
+```powershell
+python -m ops.email_check --live-model
+python -m ops.email_check --gmail-draft
+```
+
+The first uses Gemini with synthetic multi-turn conversations and an in-memory mailbox, excluding your profile and memories. It incurs normal model usage and writes a metadata report to `.test_runs/email_harness_live.json`. The second creates one temporary Gmail draft without recipients, adds the connected account as its recipient, verifies the content, then deletes that draft. Neither check sends or schedules email.
+
+To check the actual speech models, VAD, pause/resume and recorder process cleanup with bundled sample audio:
+
+```powershell
+python -m ops.audio_check
+```
+
+This check disables the microphone and exercises both CPU models; it can take about a minute and needs the Whisper model files.
+
+To check physical microphone capture, both model startups, and repeated cleanup through the application entrypoint:
+
+```powershell
+python main.py --check-audio
+```
+
+The microphone check counts incoming chunks without saving or transcribing their contents. Microphone capture begins after the model is ready. Startup supervises the Whisper worker so cancellation, a worker crash, or a readiness timeout releases the mode instead of waiting indefinitely.
+
+Windows child processes import only the lightweight entrypoint. Windows OCR is imported when screen reading is requested; loading it before the speech libraries caused native DLL initialization failures on the target machine.
+
+These checks do not test physical hotkeys or typing into a desktop application. For a live check, start `main.py` as Administrator, complete two Jarvis turns, stop the session during a response, then toggle dictation on/off in a blank editor and switch back to Jarvis.
+
+To benchmark both local speech models with Whisper loaded, and optionally play two synthetic sentences:
+
+```powershell
+python -m ops.speech_check
+python -m ops.speech_check --play
+```
+
+Speech timing, first playback, output underruns, model calls and tool durations appear in `.traces/events.jsonl`. Simple time/date/weather-only requests skip the separate memory-classifier call.
+
+## Main files
+
+| Location | Purpose |
+|---|---|
+| `main.py`, `modes/` | Hotkeys, session ownership, reminders and response delivery |
+| `modes/controller.py` | Quick hotkey command submission and serialized mode transitions |
+| `agent/loop.py`, `agent/specs.py` | Shared execution budget and agent tool permissions |
+| `agent/router.py` | Optional TypeSafe Jev classification |
+| `email_agent/` | Gmail OAuth, drafts, approvals, SQLite jobs, scheduler and CLI |
+| `stt/stream_stt.py`, `tts/playback.py` | Recorder ownership and shared cancellable playback |
+| `llm/client.py`, `memory/` | Cloud providers, retrieval and session memories |
+| `tools/registry.py` | General and email tool dispatch |
+| `tests/` | Automated behavior and integration contract checks |
+
+Gmail credentials are stored in Windows Credential Manager. `email_jobs.db` stores email content locally and is excluded from Git. Email turns are excluded from automatic fact extraction and session summaries. New traces contain metadata only and rotate with size limits. Existing logs and historical traces are retained; see the [setup guide](docs/email.md#data-and-diagnostics) for details.

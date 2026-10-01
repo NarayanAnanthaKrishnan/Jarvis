@@ -1,220 +1,269 @@
 import json
+import re
 import time
 from collections.abc import Generator
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from typing import Any
 
+from agent.context import TurnContext
+from agent.json_utils import extract_object
+from agent.prompts import SYSTEM_PROMPT, USER_PROMPT_FORMAT, REFLECTION_PROMPT
+from agent.router import route_turn
+from agent.specs import AGENTS, descriptions
+import config
 from config import MAX_STEPS, PARALLEL_WORKERS, REFLECTION_ENABLED
-from agent.prompts import SYSTEM_PROMPT, USER_PROMPT_FORMAT, TOOL_DESCRIPTIONS, REFLECTION_PROMPT
-from tools.registry import execute_tool
-from tools.profile_loader import load_profile
+from email_agent.models import EmailResult
+from email_agent.contracts import DECISION_SCHEMA, WORKFLOW_SCHEMA, validation_errors
+from email_agent.prompts import SYSTEM_PROMPT as EMAIL_SYSTEM_PROMPT
+from email_agent.workflow import EmailWorkflow
+from llm.client import ModelRequestError
 from memory.retrieval_gate import needs_memory
 from ops.tracer import trace
+from tools.profile_loader import load_profile
+from tools.registry import READ_ONLY_TOOLS, execute_tool
 
 
 def _extract_json(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    brace = text.find("{")
-    if brace >= 0:
-        depth = 0
-        for i in range(brace, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return text[brace:i+1]
-    return text
+    return json.dumps(extract_object(text), ensure_ascii=False)
+
+
+def _normalize_args(args: dict) -> dict:
+    return dict(args)
+
+
+def _clarification(answer: str) -> str:
+    question = re.split(r"(?<=[.!?])\s+", answer.strip())[-1]
+    claims = r"\b(?:(?:I|we)\s+(?:have\s+)?|(?:email|draft|it)\s+(?:is|was|has been)\s+)(?:already\s+|successfully\s+)?(?:sent|scheduled|saved|drafted)\b"
+    return question if question.endswith("?") and not re.search(claims, question, re.I) else ""
 
 
 def _format_steps(steps: list[dict]) -> str:
-    if not steps:
-        return "(none)"
-    lines = []
-    for i, s in enumerate(steps, 1):
-        result_preview = str(s["result"])[:200]
-        lines.append(f"{i}. {s['tool']}({s['args']}) → {result_preview}")
-    return "\n".join(lines)
+    return "\n".join(f"{i}. {step['tool']}({step['args']}) -> {step['result']}" for i, step in enumerate(steps, 1)) or "(none)"
 
 
-def think(user_input: str, steps: list[dict], conversation_history: list[str], llm, memories: str = "(none)") -> dict:
-    profile = load_profile()
-    current_date = datetime.now().strftime("%A, %B %d, %Y")
-    conv_str = "\n".join(conversation_history[-8:]) if conversation_history else "(none)"
-    steps_str = _format_steps(steps)
-
-    system_content = (SYSTEM_PROMPT.replace("{TOOL_DESCRIPTIONS}", TOOL_DESCRIPTIONS)
-                      .replace("{PROFILE}", profile or "(none)")
-                      .replace("{MEMORIES}", memories)
-                      .replace("{CURRENT_DATE}", current_date)
-                      .replace("{CONVERSATION_HISTORY}", conv_str))
-
-    user_content = (USER_PROMPT_FORMAT.replace("{GOAL}", user_input)
-                    .replace("{STEPS}", steps_str))
-
-    messages = [
-        {"role": "system", "content": system_content},
-        {"role": "user", "content": user_content}
-    ]
-    response = llm.call_raw(messages, temp=0.1)
-
-    if response is None:
-        return {"done": True, "answer": "I could not process that request right now.", "delivery": "speak"}
-
-    raw = _extract_json(response["message"]["content"])
+def _execute_timed(name: str, args: dict, llm: Any, context: TurnContext, parallel: bool = False) -> Any:
+    started = time.monotonic()
+    status = "error"
     try:
-        decision = json.loads(raw)
-        if not isinstance(decision, dict):
-            raise ValueError("not a dict")
+        value = execute_tool(name, args, llm, context, parallel)
+        status = value.status if isinstance(value, EmailResult) else "error" if str(value).startswith("Error:") else "complete"
+        return value
+    finally:
+        trace("tool", name=name, turn_id=context.turn_id, status=status, elapsed_s=round(time.monotonic() - started, 3))
+
+
+def validate_decision(decision: Any) -> dict:
+    if not isinstance(decision, dict):
+        raise ValueError("Decision must be an object")
+    if "done" in decision and not isinstance(decision["done"], bool):
+        raise ValueError("done must be boolean")
+    if "workflow" in decision and validation_errors(decision["workflow"], WORKFLOW_SCHEMA, "workflow"):
+        raise ValueError("Invalid email workflow")
+    if decision.get("done"):
+        if "tool" in decision or "parallel" in decision:
+            raise ValueError("Decision mixes a final answer and tools")
+        if not isinstance(decision.get("answer"), str) or decision.get("delivery", "speak") not in ("speak", "paste", "both"):
+            raise ValueError("Invalid final response")
         return decision
-    except (json.JSONDecodeError, ValueError):
-        raw_text = response["message"]["content"].strip()
-        print(f"  ⚠ JSON parse failed, trying raw text as answer")
-        if len(raw_text) > 5 and not any(c in raw_text for c in "{["):
-            return {"done": True, "answer": raw_text, "delivery": "speak"}
-        print(f"  Raw: {raw_text[:200]}")
-        return {"done": True, "answer": "I could not process that request right now.", "delivery": "speak"}
+    tools = decision.get("parallel", [decision])
+    if not isinstance(tools, list) or not tools or len(tools) > MAX_STEPS:
+        raise ValueError("Invalid tool batch")
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("tool"), str) or not tool["tool"] or not isinstance(tool.get("args", {}), dict):
+            raise ValueError("Invalid tool arguments")
+    return decision
 
 
-def _reflect(user_input: str, steps: list[dict], answer: str, llm) -> dict:
-    steps_str = _format_steps(steps)
-    current_date = datetime.now().strftime("%A, %B %d, %Y")
-    prompt = (REFLECTION_PROMPT.replace("{CURRENT_DATE}", current_date)
-              .replace("{GOAL}", user_input)
-              .replace("{STEPS}", steps_str)
-              .replace("{ANSWER}", answer))
-    messages = [
-        {"role": "system", "content": "You are a verification assistant. Return only valid JSON."},
-        {"role": "user", "content": prompt}
-    ]
-    response = llm.call_raw(messages, temp=0.1)
-    if response is None:
-        return {"correct": True}
-    raw = _extract_json(response["message"]["content"])
+def think(user_input: str, steps: list[dict], conversation_history: list[str], llm: Any, memories: str = "(none)", context: TurnContext | None = None) -> dict:
+    context = context or TurnContext()
+    spec = AGENTS[context.agent_id]
+    template = EMAIL_SYSTEM_PROMPT if context.agent_id == "email" else SYSTEM_PROMPT
+    system = (template.replace("{TOOL_DESCRIPTIONS}", descriptions(context.agent_id))
+              .replace("{PROFILE}", load_profile() or "(none)").replace("{MEMORIES}", memories)
+              .replace("{CURRENT_DATE}", datetime.now().astimezone().isoformat())
+              .replace("{CONVERSATION_HISTORY}", "\n".join(conversation_history[-8:]) or "(none)"))
+    system += f"\n\n{spec.system_prompt}\nActive local draft ID: {context.active_draft_id}."
+    system += "\nPending email workflow: " + json.dumps(context.email_workflow.snapshot())
+    options = {"profile": "email", "response_schema": DECISION_SCHEMA} if context.agent_id == "email" else {"temp": 0.1, "max_tokens": 2048}
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": USER_PROMPT_FORMAT.replace("{GOAL}", user_input).replace("{STEPS}", _format_steps(steps))}]
+    for attempt in range(2):
+        context.check_active()
+        response = llm.call_raw(messages, **options)
+        if response is None:
+            raise ModelRequestError("The model is unavailable; please retry. Any saved draft is retained." if context.agent_id == "email" else "The model is unavailable; please retry.")
+        try:
+            if response.get("finish_reason") in ("MAX_TOKENS", "length", "max_tokens"):
+                raise ValueError("Decision was truncated")
+            decision = validate_decision(extract_object(response["message"]["content"]))
+            if context.agent_id == "email" and "workflow" not in decision:
+                raise ValueError("Email decision omitted workflow")
+            names = [entry.get("tool") for entry in decision.get("parallel", [decision])] if not decision.get("done") else []
+            if any(name not in spec.allowed_tools for name in names):
+                raise ValueError("Decision used a tool outside this agent")
+            return decision
+        except (KeyError, TypeError, ValueError) as exc:
+            content = response.get("message", {}).get("content", "")
+            trace("error", where="decision", turn_id=context.turn_id, agent_id=context.agent_id,
+                  error_type=type(exc).__name__, error_code="invalid_decision", attempt=attempt + 1,
+                  output_chars=len(content) if isinstance(content, str) else 0, finish_reason=response.get("finish_reason"))
+            if attempt or context.remaining_steps < 2:
+                message = "I couldn't interpret the model's response after retrying. Please try again."
+                if context.agent_id == "email":
+                    message += " Any saved draft is retained."
+                raise ModelRequestError(message) from exc
+            context.remaining_steps -= 1
+            messages.append({"role": "user", "content": "Your previous response was not a complete valid decision. No tool was executed for it. Return one complete JSON object using only the available tools and the required schema. Do not return a schema, markdown, commentary or multiple decisions."})
+    raise ModelRequestError("No usable decision")
+
+
+def _reflect(user_input: str, steps: list[dict], answer: str, llm: Any) -> dict:
+    prompt = (REFLECTION_PROMPT.replace("{CURRENT_DATE}", datetime.now().isoformat()).replace("{GOAL}", user_input)
+              .replace("{STEPS}", _format_steps(steps)).replace("{ANSWER}", answer))
     try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
+        response = llm.call_raw([{"role": "system", "content": "Verify the answer. Return valid JSON."}, {"role": "user", "content": prompt}], temp=0.1)
+        return extract_object(response["message"]["content"]) if response else {"correct": True}
+    except (ValueError, TypeError, KeyError):
         return {"correct": True}
 
 
-def _stream_summarize(user_input: str, steps: list[dict], llm) -> Generator[str, None, None]:
-    formatted = "\n".join(
-        f"[{s['tool']}] {str(s['result'])[:300]}" for s in steps
-    )
-    prompt = (
-        f"The user's question was: {user_input}\n\n"
-        f"Tool results gathered:\n{formatted}\n\n"
-        f"Answer the user's original question using the data above. "
-        f"Produce a concise spoken answer in 1-2 sentences. Use exact numbers. "
-        f"If the data doesn't fully answer the question, say what you know and what's missing. "
-        f"No meta-commentary."
-    )
-    messages = [
-        {"role": "system", "content": "You produce short spoken responses from tool data. Answer the user's question directly."},
-        {"role": "user", "content": prompt}
-    ]
-    yield from llm.stream_chat(messages, temp=0.1)
+def _stream_summarize(user_input: str, steps: list[dict], llm: Any) -> Generator[str, None, None]:
+    yield from llm.stream_chat([{"role": "system", "content": "Answer concisely from tool results. State what is missing. Never claim actions occurred without successful tool results."}, {"role": "user", "content": f"Question: {user_input}\nResults:\n{_format_steps(steps)}"}], temp=0.1)
 
 
-def run_agent(user_input: str, conversation_history: list[str], llm) -> dict:
+def run_agent(user_input: str, conversation_history: list[str], llm: Any, context: TurnContext | None = None) -> dict:
+    context = context or TurnContext()
+    context.check_active()
+    started = time.monotonic()
+    trace("turn_start", turn_id=context.turn_id)
+    route = route_turn(user_input, conversation_history, {"active_draft_id": context.active_draft_id, **context.email_workflow.snapshot()})
+    context.agent_id = route.agent_id
+    context.email_touched = context.agent_id == "email" or bool(
+        (context.active_draft_id is not None or re.search(r"\b(email|e-mail|gmail)\b", user_input, re.I))
+        and re.search(r"\b(draft|write|send|schedule|reschedule|cancel|edit|revise|shorter|longer|formal)\b", user_input, re.I))
+    gate = route.memory_needed if route.memory_needed is not None else needs_memory(user_input, llm)
+    context.check_active()
+    memories = "(none)"
+    if gate:
+        try:
+            from memory.store import memory_store
+            values = memory_store.query("semantic", user_input, n=5) + memory_store.query("episodic", user_input, n=3)
+            memories = "\n".join(f"- {value}" for value in values) or "(none)"
+        except Exception as exc:
+            trace("error", where="memory_retrieval", error_type=type(exc).__name__)
+    context.memories = memories
     steps: list[dict] = []
-    start_ts = time.time()
-    trace("turn_start", user_input=user_input)
+    seen: set[str] = set()
+    last_email: EmailResult | None = None
+    argument_failures = 0
 
-    gate_needed = needs_memory(user_input, llm)
-    trace("gate", needs_memory=gate_needed)
-    if gate_needed:
-        from memory.store import memory_store
-        semantic = memory_store.query("semantic", user_input, n=5)
-        episodic = memory_store.query("episodic", user_input, n=3)
-        memories = "\n".join(f"- {m}" for m in (semantic + episodic)) if semantic or episodic else "(none)"
-    else:
-        memories = "(none)"
+    def finish(output: str, delivery: str = "speak", stream: Any = None) -> dict:
+        context.check_active()
+        trace("turn_end", turn_id=context.turn_id, steps=MAX_STEPS - context.remaining_steps, elapsed_s=round(time.monotonic() - started, 2))
+        return {"output": output, "delivery": delivery, "stream": stream, "gate_needed": gate,
+                "email_touched": context.email_touched, "email_result": last_email,
+                "preview": last_email.preview if last_email else None,
+                "confirmation_id": last_email.confirmation_id if last_email else None}
 
-    for i in range(MAX_STEPS):
-        decision = think(user_input, steps, conversation_history, llm, memories)
+    if (context.agent_id == "email" and context.email_workflow.action == "schedule"
+            and context.email_workflow.awaiting == "time" and context.active_draft_id is not None):
+        from datetime import timezone
+        from email_agent.timing import parse_send_time
+        from email_agent.models import EmailError
+        try:
+            now = datetime.fromtimestamp(context.email_service.clock(), timezone.utc) if context.email_service else datetime.now(timezone.utc)
+            parse_send_time(user_input, context.email_workflow.timezone or config.EMAIL_TIMEZONE, now)
+        except EmailError:
+            trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="rejected", time_source="deterministic")
+        else:
+            trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="accepted", time_source="deterministic")
+            context.email_workflow.when = user_input
+            context.email_workflow.resolved_when = None
+            context.remaining_steps -= 1
+            last_email = _execute_timed("email_prepare", {"draft_id": context.active_draft_id,
+                                        "action": "schedule", "when": user_input,
+                                        "timezone": context.email_workflow.timezone}, llm, context)
+            if isinstance(last_email, EmailResult):
+                return finish(last_email.message)
+            return finish("I couldn't prepare the scheduling preview. The draft is still saved.")
 
+    while context.remaining_steps > 0:
+        context.check_active()
+        try:
+            decision = think(user_input, steps, conversation_history, llm, memories, context)
+        except ModelRequestError as exc:
+            return finish(" ".join(part for part in (last_email.message if last_email else "", str(exc)) if part))
+        context.remaining_steps -= 1
+        context.check_active()
+        if context.agent_id == "email" and "workflow" in decision:
+            state = decision["workflow"]
+            if state.get("new_draft"):
+                context.active_draft_id = None
+                context.email_workflow = EmailWorkflow()
+            context.email_workflow.update(state)
         if decision.get("done"):
-            answer = decision.get("answer", "")
-            delivery = decision.get("delivery", "speak")
-            trace("think", step=i + 1, tool=None, done=True, reason="")
-
-            was_llm_fallback = "could not process" in answer.lower()
-            if REFLECTION_ENABLED and steps and not was_llm_fallback:
-                print(f"  🔍 Reflecting on answer...")
+            answer = decision["answer"]
+            workflow_questions = {"purpose": "What should the email be about?", "recipient": "What is the complete recipient email address?",
+                                 "time": "When should I schedule it? Please include a date and time.", "details": "What detail should I change?"}
+            if last_email:
+                clarification = _clarification(answer)
+                clarification = workflow_questions.get(context.email_workflow.awaiting, clarification)
+                return finish(" ".join(part for part in (last_email.message, clarification) if part))
+            if context.email_touched:
+                question = workflow_questions.get(context.email_workflow.awaiting, _clarification(answer))
+                if question:
+                    return finish(question)
+                return finish("No email action has been completed. Please provide the recipient or draft ID and the action you want.")
+            if REFLECTION_ENABLED and steps and context.remaining_steps > 0:
                 verdict = _reflect(user_input, steps, answer, llm)
-                if not verdict.get("correct", True):
-                    issue = verdict.get("issue", "answer may be incomplete")
-                    hint = verdict.get("hint", "")
-                    print(f"  ⚠ Reflection: {issue}")
-                    steps.append({
-                        "tool": "_reflection",
-                        "args": {},
-                        "result": f"Reflection feedback: {issue}. {hint}"
-                    })
-                    if i + 1 < MAX_STEPS:
-                        continue
-
-            trace("final", delivery=delivery, output_preview=answer[:200])
-            elapsed = time.time() - start_ts
-            trace("turn_end", steps=len(steps), elapsed_s=round(elapsed, 2))
-            return {"output": answer, "delivery": delivery, "stream": None, "gate_needed": gate_needed}
-
+                if verdict.get("correct") is False:
+                    steps.append({"tool": "reflection", "args": {}, "result": verdict})
+                    continue
+            return finish(answer, decision.get("delivery", "speak"))
+        batch = decision.get("parallel", [decision])
         if "parallel" in decision:
-            tools_list = decision["parallel"]
-            reason = decision.get("reason", "")
-            trace("think", step=i + 1, tool="parallel", done=False, reason=reason)
-            print(f"  🔧 Step {i+1}: Parallel ({len(tools_list)} tools) — {reason}")
-            results = []
+            if any(item["tool"] not in READ_ONLY_TOOLS or item["tool"] not in AGENTS[context.agent_id].allowed_tools for item in batch):
+                steps.append({"tool": "parallel", "args": {}, "result": "Error: entire batch rejected; only permitted read-only tools may run in parallel"})
+                continue
+            if len(batch) - 1 > context.remaining_steps:
+                steps.append({"tool": "parallel", "args": {}, "result": "Error: batch exceeds remaining tool budget"})
+                continue
+            context.remaining_steps -= len(batch) - 1
             with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
-                futures = {}
-                for t in tools_list:
-                    tn = t.get("tool", "")
-                    ta = t.get("args", {})
-                    futures[pool.submit(execute_tool, tn, ta, llm)] = (tn, ta)
-                for f in futures:
-                    tn, ta = futures[f]
-                    r = f.result()
-                    results.append(f"{tn} → {r[:200]}")
-                    print(f"     {tn} → {str(r)[:150]}")
-                    trace("tool", name=tn, args=ta, result_preview=str(r)[:200])
-                    if str(r).startswith("Error"):
-                        print(f"  ⚠ Tool error in {tn}. Agent will see this in next think step.")
-            combined = " | ".join(results)
-            steps.append({"tool": "parallel", "args": tools_list, "result": combined})
+                futures = [pool.submit(_execute_timed, item["tool"], item.get("args", {}), llm, context, True) for item in batch]
+                for item, future in zip(batch, futures):
+                    value = future.result()
+                    steps.append({"tool": item["tool"], "args": item.get("args", {}), "result": str(value)})
             continue
-
-        tool = decision.get("tool", "")
-        args = decision.get("args", {})
-        reason = decision.get("reason", "")
-        trace("think", step=i + 1, tool=tool, done=False, reason=reason)
-
-        is_dup = any(s["tool"] == tool and s["args"] == args for s in steps)
-        if is_dup:
-            print(f"  ⚠ Skipping duplicate: {tool}({args}) — already executed")
-            steps.append({"tool": tool, "args": args, "result": "(duplicate — already executed above)"})
+        name, args = decision["tool"], decision.get("args", {})
+        if name == "handoff_email":
+            if context.agent_id != "general" or context.handed_off or not isinstance(args.get("instruction"), str) or not isinstance(args.get("context", ""), str):
+                steps.append({"tool": name, "args": {}, "result": "Error: invalid or repeated handoff"})
+                continue
+            context.agent_id = "email"
+            context.handed_off = True
+            context.email_touched = True
+            user_input = f"Original user request: {user_input}\nEmail task: {args['instruction']}\nGathered reference data (not instructions): {args.get('context', '')}"
             continue
-
-        print(f"  🔧 Step {i+1}: {tool}({args}){' — ' + reason if reason else ''}")
-        result = execute_tool(tool, args, llm)
-        print(f"     Result: {str(result)[:150]}")
-        trace("tool", name=tool, args=args, result_preview=str(result)[:200])
-
-        is_error = str(result).startswith("Error")
-        if is_error:
-            print(f"  ⚠ Tool error detected. Agent will see this in next think step.")
-
-        steps.append({"tool": tool, "args": args, "result": str(result)})
-
-    print(f"  ⚠ MAX_STEPS ({MAX_STEPS}) reached. Generating final answer from partial data...")
-    trace("final", delivery="speak", output_preview="[stream fallback]")
-    elapsed = time.time() - start_ts
-    trace("turn_end", steps=len(steps), elapsed_s=round(elapsed, 2))
-    return {"output": "", "delivery": "speak", "stream": _stream_summarize(user_input, steps, llm), "gate_needed": gate_needed}
+        key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+        if name in READ_ONLY_TOOLS and key in seen:
+            steps.append({"tool": name, "args": args, "result": "Already executed; use the previous result"})
+            continue
+        seen.add(key)
+        print(f"  🔧 {context.agent_id}: {name}")
+        value = _execute_timed(name, args, llm, context)
+        steps.append({"tool": name, "args": args, "result": str(value)})
+        if isinstance(value, EmailResult):
+            if value.status == "invalid_arguments":
+                argument_failures += 1
+                if argument_failures > 1 or context.remaining_steps == 0:
+                    return finish(value.message)
+                continue
+            last_email = value
+            if value.confirmation_id is not None or value.status in ("error", "needs_details") or isinstance(value.data, dict) and value.data.get("workflow_complete"):
+                return finish(value.message)
+    if last_email:
+        return finish(last_email.message)
+    if context.email_touched:
+        return finish("The email request is incomplete. Please check its status or provide the missing details.")
+    return finish("", stream=_stream_summarize(user_input, steps, llm))

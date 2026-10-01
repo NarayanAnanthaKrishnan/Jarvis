@@ -15,7 +15,7 @@ def search_web(query: str, num_results: int = 8) -> str:
         title = r.get("title", "")
         body = r.get("body", "")
         href = r.get("href", "")
-        lines.append(f"- {title}: {body} ({href})")
+        lines.append(f"- {href} | {title}: {body}")
     return "\n".join(lines)
 
 
