@@ -79,7 +79,9 @@ Read the full From, To, Cc, Bcc, subject, body and timing before confirming. A d
 
 Editing a draft pauses its pending delivery. Request a new preview after an edit. The worker checks the live Gmail draft and its revision against the approved snapshot before sending. If Gmail content changes, delivery requires review. Use Jarvis to edit managed drafts; Gmail edits can introduce HTML or MIME structures outside this version's plain text support.
 
-Use AM/PM or an unambiguous 24-hour time, plus an IANA timezone when different from the default, such as `Europe/London`. Ambiguous numeric dates, timezone abbreviations, past times and repeated/nonexistent daylight-saving clock times require clarification. An ISO timestamp with an explicit offset can disambiguate a daylight-saving transition.
+Use AM/PM or an unambiguous 24-hour time, plus an IANA timezone when different from the default, such as `Europe/London`. Voice forms such as “later today 6 PM,” “six PM,” and “in half an hour” are normalized to a time before the scheduling model runs. If a request offers multiple times, Jarvis asks you to choose one. Ambiguous numeric dates, timezone abbreviations, past times and repeated/nonexistent daylight-saving clock times require clarification. An ISO timestamp with an explicit offset can disambiguate a daylight-saving transition.
+
+When a spoken recipient is normalized, Jarvis reads the candidate back using “at” and “dot” and waits for confirmation before adding it. Say “no” and repeat or spell the full address to correct it. Canonical addresses already written with `@` are accepted directly.
 
 ## Delivery states and recovery
 

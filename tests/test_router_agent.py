@@ -45,6 +45,15 @@ def test_router_disabled_failure_and_invalid_choice(monkeypatch: pytest.MonkeyPa
     assert route_turn("email", [], {}, client).agent_id == "general"
 
 
+def test_pending_email_followup_takes_precedence_over_jev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "JEV_ROUTING_ENABLED", True)
+    client = Mock()
+    result = route_turn("later today 6pm", [], {"active_draft_id": 7, "action": "schedule", "awaiting": "time"}, client)
+    assert result.agent_id == "email"
+    assert result.fallback_reason == ""
+    client.system_one.assert_not_called()
+
+
 def test_tool_permissions_are_enforced() -> None:
     assert "not available" in execute_tool("paste_at_cursor", {"text": "bad"}, context=TurnContext(agent_id="email"))
     assert "read-only" in execute_tool("take_note", {"note": "bad"}, parallel=True)

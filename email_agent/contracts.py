@@ -40,7 +40,7 @@ DRAFT_SCHEMA = _object({"subject": {"type": "string"}, "body": _TEXT}, ["subject
 WORKFLOW_SCHEMA = _object({
     "action": {"type": "string", "enum": ["draft", "send", "schedule"]},
     "when": _OPTIONAL_TEXT, "timezone": _OPTIONAL_TEXT,
-    "awaiting": {"type": ["string", "null"], "enum": ["purpose", "recipient", "time", "details", None]},
+    "awaiting": {"type": ["string", "null"], "enum": ["purpose", "recipient", "recipient_confirmation", "time", "details", None]},
     "new_draft": {"type": "boolean"},
 }, ["action", "when", "timezone", "awaiting", "new_draft"])
 DECISION_SCHEMA = {"anyOf": [

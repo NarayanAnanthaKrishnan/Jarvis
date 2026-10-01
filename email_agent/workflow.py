@@ -10,6 +10,7 @@ class EmailWorkflow:
     awaiting: str | None = None
     unresolved_recipients: list[str] = field(default_factory=list)
     resolved_when: str | None = None
+    pending_recipient: dict[str, Any] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         return asdict(self)

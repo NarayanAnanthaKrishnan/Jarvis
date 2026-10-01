@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import config
+from email_agent.addressing import normalize_spoken_address, speak_address
 from email_agent.contracts import TOOL_SCHEMAS, validation_errors
 from email_agent.models import EmailError, EmailResult, addresses
 from email_agent.timing import parse_send_time
@@ -25,7 +26,39 @@ def execute_email(name: str, args: dict, context: Any, llm: Any) -> EmailResult:
     errors = validation_errors(args, TOOL_SCHEMAS[name])
     if errors:
         return EmailResult("invalid_arguments", "I could not interpret the email details. Please repeat the recipient and requested action.", data={"validation_errors": errors})
+    held_recipient = None
     if name in ("email_draft", "email_recipients"):
+        args = dict(args)
+        for field in ("to", "cc", "bcc"):
+            if args.get(field) is not None:
+                normalized = []
+                for value in args[field]:
+                    candidate = normalize_spoken_address(value)
+                    if candidate is None:
+                        normalized.append(value)
+                    elif candidate[1]:
+                        if context.email_workflow.pending_recipient is not None:
+                            return EmailResult("needs_details", "Please confirm the previously read-back address first.", context.active_draft_id)
+                        held_recipient = {"field": field, "address": candidate[0],
+                                          "draft_id": args.get("draft_id") or context.active_draft_id,
+                                          "mode": args.get("mode") or ("add" if context.email_workflow.awaiting == "recipient" else "replace")}
+                        context.email_workflow.pending_recipient = held_recipient
+                        if field not in context.email_workflow.unresolved_recipients:
+                            context.email_workflow.unresolved_recipients.append(field)
+                    else:
+                        normalized.append(candidate[0])
+                if normalized:
+                    args[field] = normalized
+                else:
+                    args.pop(field, None)
+        if held_recipient and name == "email_recipients":
+            if held_recipient["draft_id"] is None:
+                raise EmailError("Retrieve the draft before changing its recipient")
+            context.email_workflow.awaiting = "recipient_confirmation"
+            prompt = f"I heard {speak_address(held_recipient['address'])}. Is that correct? Say yes to add it, or say no and spell the address."
+            return EmailResult("needs_details", prompt, held_recipient["draft_id"])
+        if held_recipient and name == "email_draft" and any(args.get(field) for field in ("to", "cc", "bcc")):
+            held_recipient["mode"] = "add"
         for field in ("to", "cc", "bcc"):
             if args.get(field) is not None:
                 try:
@@ -61,7 +94,13 @@ def execute_email(name: str, args: dict, context: Any, llm: Any) -> EmailResult:
         values = dict(args)
         if values.get("draft_id") is None and context.active_draft_id is not None:
             values["draft_id"] = context.active_draft_id
-        return _advance(service.draft(context=context, llm=llm, **values), context)
+        result = _advance(service.draft(context=context, llm=llm, **values), context)
+        if held_recipient:
+            held_recipient["draft_id"] = result.draft_id
+            context.email_workflow.pending_recipient = held_recipient
+            context.email_workflow.awaiting = "recipient_confirmation"
+            result.message += f" I heard {speak_address(held_recipient['address'])}. Is that correct? Say yes to add it, or say no and spell the address."
+        return result
     if name == "email_recipients":
         values = dict(args)
         if "mode" not in values:

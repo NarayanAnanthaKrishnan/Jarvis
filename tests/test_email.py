@@ -356,7 +356,7 @@ def test_mutation_repetition_and_invalid_recipients(setup: tuple) -> None:
         EmailPayload(provider.account, ["ok@example.com\nBcc: bad@example.com"], "s", "b").raw()
 
 
-@pytest.mark.parametrize("value", ["tomorrow", "at 9", "yesterday at 9am", "10/11 at 9am"])
+@pytest.mark.parametrize("value", ["tomorrow", "at 9", "yesterday at 9am", "10/11 at 9am", "later today 6pm or 7pm"])
 def test_ambiguous_or_past_time_rejected(value: str) -> None:
     with pytest.raises(EmailError):
         parse_send_time(value, "America/New_York", datetime(2026, 9, 30, 16, tzinfo=timezone.utc))
@@ -368,6 +368,20 @@ def test_dst_and_timezone() -> None:
         with pytest.raises(EmailError):
             parse_send_time(value, "America/New_York", now)
     assert parse_send_time("2026-11-01T01:30:00-04:00", "America/New_York", now).hour == 5
+
+
+@pytest.mark.parametrize("value, expected_hour", [("later today 6pm", 22), ("later today 7pm", 23), ("schedule it for later today 6pm", 22), ("today at six pm", 22)])
+def test_spoken_later_today_times(value: str, expected_hour: int) -> None:
+    now = datetime(2026, 10, 1, 20, tzinfo=timezone.utc)
+    due = parse_send_time(value, "America/New_York", now)
+    assert (due.hour, due.minute) == (expected_hour, 0)
+
+
+@pytest.mark.parametrize("value, expected_minutes", [("in half an hour", 30), ("in an hour", 60), ("in a quarter hour", 15)])
+def test_spoken_relative_durations(value: str, expected_minutes: int) -> None:
+    now = datetime(2026, 10, 1, 20, tzinfo=timezone.utc)
+    due = parse_send_time(value, "America/New_York", now)
+    assert (due - now).total_seconds() == expected_minutes * 60
 
 
 @pytest.mark.parametrize("text, expected", [("Confirm email seven.", 7), ("confirm email 12", 12), ("confirm email twenty three", 23), ("yes", None), ("The email says confirm email 7", None)])

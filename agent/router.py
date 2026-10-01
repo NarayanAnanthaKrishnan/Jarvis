@@ -27,7 +27,7 @@ def _local_route(text: str, workflow: dict[str, Any]) -> RouteDecision | None:
     awaiting = workflow.get("awaiting")
     detail = (
         awaiting == "recipient" and re.search(r"@|\b(address|at|dot|recipient|don't have|do not have|later)\b", value)
-        or awaiting == "time" and re.search(r"\d|\b(today|tomorrow|next|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|noon|midnight|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|am|pm|later)\b", value)
+        or awaiting == "time" and re.search(r"\d|\b(today|tomorrow|next|monday|tuesday|wednesday|thursday|friday|saturday|sunday|morning|afternoon|evening|noon|midnight|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|an|hour|hours|minute|minutes|second|seconds|am|pm|later)\b", value)
         or awaiting in ("purpose", "details") and value not in {"thanks", "thank you", "okay", "ok"})
     followup = not unrelated and (
         detail
@@ -40,6 +40,9 @@ def _local_route(text: str, workflow: dict[str, Any]) -> RouteDecision | None:
 
 def route_turn(text: str, recent_history: list[str], workflow_state: dict[str, Any], client: Any = None) -> RouteDecision:
     local = _local_route(text, workflow_state)
+    if local and workflow_state.get("awaiting") in ("recipient", "time"):
+        trace("route", agent_id="email", source="local", fallback_reason="active_email_followup", confidence=1.0)
+        return local
     if not config.JEV_ROUTING_ENABLED:
         result = local or RouteDecision()
         trace("route", agent_id=result.agent_id, source=result.source, fallback_reason=result.fallback_reason, confidence=result.confidence)

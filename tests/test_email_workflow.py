@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -71,16 +72,18 @@ def test_complete_progressive_conversation_keeps_one_draft(harness: tuple) -> No
 
 def test_pending_schedule_time_followup_is_parsed_without_an_llm_decision(harness: tuple) -> None:
     provider, service, llm, context = harness
+    service.clock = lambda: datetime(2026, 10, 1, 20, 0, tzinfo=timezone.utc).timestamp()
     responses(llm, {"subject": "Software role", "body": "Hello Alex, are you hiring?"})
     draft = service.draft("Ask Alex about an opening", context, llm, to=["alex@example.com"])
     context.active_draft_id = draft.draft_id
     context.email_workflow = EmailWorkflow(action="schedule", awaiting="time")
     followup_context = next_context(context)
     before = llm.call_raw.call_count
-    result = loop.run_agent("at 5pm", [], llm, followup_context)
+    result = loop.run_agent("later today 6pm", [], llm, followup_context)
     assert llm.call_raw.call_count == before
     assert result["confirmation_id"] == 1
     assert service.store.job(1)["status"] == "awaiting_confirmation"
+    assert service.store.job(1)["due_at"] == pytest.approx(datetime(2026, 10, 1, 22, 0, tzinfo=timezone.utc).timestamp())
     assert not provider.sent
 
 
@@ -91,7 +94,7 @@ def test_unparseable_schedule_followup_does_not_create_a_job(harness: tuple) -> 
     context.email_workflow = EmailWorkflow(action="schedule", awaiting="time")
     llm.call_raw.return_value = {"message": {"content": json.dumps({"done": True, "answer": "What day should I schedule it for?", "workflow": {"action": "schedule", "when": None, "timezone": None, "awaiting": "time", "new_draft": False}})}}
     result = loop.run_agent("at 99pm", [], llm, context)
-    assert "When should I schedule" in result["output"]
+    assert "couldn't read that as a schedule time" in result["output"]
     with service.store.transaction() as conn:
         assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
@@ -105,6 +108,47 @@ def test_recipient_name_is_preserved_for_draft_writing_and_address_is_requested(
     assert provider.drafts["1"].to == []
     assert "address" in result.message.lower()
     assert context.email_workflow.awaiting == "recipient"
+
+
+def test_spoken_recipient_requires_readback_before_it_is_added(harness: tuple) -> None:
+    provider, _, llm, context = harness
+    responses(llm, {"subject": "Role question", "body": "Hello Narayan, are you hiring?"})
+    result = execute_email("email_draft", {"instruction": "Ask about a software developer role", "to": ["Narayan add the regmail dot com"]}, context, llm)
+    assert result.status == "draft"
+    assert context.email_workflow.awaiting == "recipient_confirmation"
+    assert context.email_workflow.pending_recipient == {"field": "to", "address": "Narayan@gmail.com", "draft_id": 1, "mode": "replace"}
+    assert provider.drafts["1"].to == []
+    assert "Narayan at gmail dot com" in result.message
+    confirmed = loop.run_agent("yes", [], llm, context)
+    assert provider.drafts["1"].to == ["Narayan@gmail.com"]
+    assert context.email_workflow.pending_recipient is None
+    assert "Draft" in confirmed["output"]
+    assert llm.call_raw.call_count == 1
+
+
+def test_initial_schedule_extracts_time_even_when_model_omits_it(harness: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    provider, service, llm, context = harness
+    service.clock = lambda: datetime(2026, 10, 1, 20, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(loop, "needs_memory", lambda *args: False)
+    responses(llm, decision("email_draft", {"instruction": "Ask about a project review", "to": ["alex@example.com"]}, action="draft"),
+              {"subject": "Project review", "body": "Could we discuss the review?"})
+    result = loop.run_agent("Schedule an email to alex@example.com for later today 6pm asking about a project review", [], llm, context)
+    assert result["confirmation_id"] == 1
+    assert service.store.job(1)["due_at"] == pytest.approx(datetime(2026, 10, 1, 22, 0, tzinfo=timezone.utc).timestamp())
+    assert service.store.job(1)["status"] == "awaiting_confirmation"
+    assert not provider.sent
+
+
+def test_two_schedule_time_choices_are_clarified_without_creating_job(harness: tuple, monkeypatch: pytest.MonkeyPatch) -> None:
+    _, service, llm, context = harness
+    service.clock = lambda: datetime(2026, 10, 1, 20, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(loop, "needs_memory", lambda *args: False)
+    responses(llm, decision("email_draft", {"instruction": "Ask about a project review", "to": ["alex@example.com"]}, action="schedule", when="6pm"),
+              {"subject": "Project review", "body": "Could we discuss the review?"})
+    result = loop.run_agent("Schedule an email to alex@example.com for later today 6pm or 7pm asking about a project review", [], llm, context)
+    assert "more than one possible time" in result["output"].lower()
+    with service.store.transaction() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_complete_request_prepares_after_draft_without_extra_model_decision(harness: tuple) -> None:
@@ -152,6 +196,7 @@ def test_revision_without_id_reuses_draft_and_explicit_new_request_creates_anoth
     ("draft an email asking about a role", {}, "email"),
     ("alex@example.com", {"awaiting": "recipient", "active_draft_id": 1}, "email"),
     ("tomorrow at nine am", {"awaiting": "time", "active_draft_id": 1}, "email"),
+    ("in half an hour", {"awaiting": "time", "active_draft_id": 1}, "email"),
     ("about a software role", {"awaiting": "purpose"}, "email"),
     ("what's the weather outside?", {"awaiting": "time", "active_draft_id": 1}, "general"),
     ("research the company and email a summary", {}, "general"),

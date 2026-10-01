@@ -3,18 +3,20 @@ import re
 import time
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from agent.context import TurnContext
 from agent.json_utils import extract_object
 from agent.prompts import SYSTEM_PROMPT, USER_PROMPT_FORMAT, REFLECTION_PROMPT
-from agent.router import route_turn
+from agent.router import RouteDecision, route_turn
 from agent.specs import AGENTS, descriptions
 import config
 from config import MAX_STEPS, PARALLEL_WORKERS, REFLECTION_ENABLED
-from email_agent.models import EmailResult
+from email_agent.models import EmailError, EmailResult
+from email_agent.addressing import is_address_confirmation, is_address_rejection, normalize_spoken_address, speak_address
 from email_agent.contracts import DECISION_SCHEMA, WORKFLOW_SCHEMA, validation_errors
+from email_agent.timing import extract_time_phrase, parse_send_time
 from email_agent.prompts import SYSTEM_PROMPT as EMAIL_SYSTEM_PROMPT
 from email_agent.workflow import EmailWorkflow
 from llm.client import ModelRequestError
@@ -136,7 +138,9 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
     context.check_active()
     started = time.monotonic()
     trace("turn_start", turn_id=context.turn_id)
-    route = route_turn(user_input, conversation_history, {"active_draft_id": context.active_draft_id, **context.email_workflow.snapshot()})
+    pending_address = context.email_workflow.pending_recipient
+    route = (RouteDecision("email", 1.0, False, "local", "recipient_confirmation") if pending_address else
+             route_turn(user_input, conversation_history, {"active_draft_id": context.active_draft_id, **context.email_workflow.snapshot()}))
     context.agent_id = route.agent_id
     context.email_touched = context.agent_id == "email" or bool(
         (context.active_draft_id is not None or re.search(r"\b(email|e-mail|gmail)\b", user_input, re.I))
@@ -156,6 +160,21 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
     seen: set[str] = set()
     last_email: EmailResult | None = None
     argument_failures = 0
+    schedule_requested = context.agent_id == "email" and bool(re.search(r"\b(schedule|reschedule|send\s+(?:it\s+)?later)\b", user_input, re.I))
+    schedule_due: datetime | None = None
+    schedule_error: str | None = None
+    if schedule_requested:
+        try:
+            phrase = extract_time_phrase(user_input)
+            if phrase:
+                now = datetime.fromtimestamp(context.email_service.clock(), timezone.utc) if context.email_service else datetime.now(timezone.utc)
+                schedule_due = parse_send_time(phrase, context.email_workflow.timezone or config.EMAIL_TIMEZONE, now)
+        except EmailError as exc:
+            schedule_error = str(exc)
+            trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="rejected", time_source="request")
+        else:
+            if schedule_due:
+                trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="accepted", time_source="request")
 
     def finish(output: str, delivery: str = "speak", stream: Any = None) -> dict:
         context.check_active()
@@ -165,23 +184,43 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
                 "preview": last_email.preview if last_email else None,
                 "confirmation_id": last_email.confirmation_id if last_email else None}
 
+    if (pending_address is not None):
+        if is_address_confirmation(user_input):
+            context.email_workflow.pending_recipient = None
+            field = pending_address["field"]
+            context.email_workflow.unresolved_recipients = [name for name in context.email_workflow.unresolved_recipients if name != field]
+            context.email_workflow.awaiting = "recipient"
+            args = {"draft_id": pending_address["draft_id"], field: [pending_address["address"]], "mode": pending_address["mode"]}
+            context.remaining_steps -= 1
+            last_email = _execute_timed("email_recipients", args, llm, context)
+            return finish(last_email.message if isinstance(last_email, EmailResult) else str(last_email))
+        if is_address_rejection(user_input):
+            context.email_workflow.pending_recipient = None
+            context.email_workflow.awaiting = "recipient"
+            return finish("Okay. Please say the complete address again, spelling any unclear part.")
+        corrected = normalize_spoken_address(re.sub(r"^\s*(?:actually|no[, ]+)\s*", "", user_input, flags=re.I))
+        if corrected:
+            pending_address["address"] = corrected[0]
+            context.email_workflow.pending_recipient = pending_address
+            return finish(f"I heard {speak_address(corrected[0])}. Is that correct? Say yes to add it, or say no and spell the address.")
+        return finish(f"I heard {speak_address(pending_address['address'])}. Say yes if that is correct, or say no and spell the address.")
+
     if (context.agent_id == "email" and context.email_workflow.action == "schedule"
             and context.email_workflow.awaiting == "time" and context.active_draft_id is not None):
-        from datetime import timezone
-        from email_agent.timing import parse_send_time
-        from email_agent.models import EmailError
         try:
             now = datetime.fromtimestamp(context.email_service.clock(), timezone.utc) if context.email_service else datetime.now(timezone.utc)
-            parse_send_time(user_input, context.email_workflow.timezone or config.EMAIL_TIMEZONE, now)
-        except EmailError:
+            phrase = extract_time_phrase(user_input) or user_input
+            due = parse_send_time(phrase, context.email_workflow.timezone or config.EMAIL_TIMEZONE, now)
+        except EmailError as exc:
             trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="rejected", time_source="deterministic")
+            return finish(str(exc) if "possible time" in str(exc).lower() or "future" in str(exc).lower() else "I couldn't read that as a schedule time. Try a single time such as later today at 6 PM.")
         else:
             trace("email_time_followup", turn_id=context.turn_id, time_present=True, time_parse="accepted", time_source="deterministic")
-            context.email_workflow.when = user_input
+            context.email_workflow.when = due.isoformat()
             context.email_workflow.resolved_when = None
             context.remaining_steps -= 1
             last_email = _execute_timed("email_prepare", {"draft_id": context.active_draft_id,
-                                        "action": "schedule", "when": user_input,
+                                        "action": "schedule", "when": due.isoformat(),
                                         "timezone": context.email_workflow.timezone}, llm, context)
             if isinstance(last_email, EmailResult):
                 return finish(last_email.message)
@@ -201,6 +240,19 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
                 context.active_draft_id = None
                 context.email_workflow = EmailWorkflow()
             context.email_workflow.update(state)
+            if schedule_requested:
+                context.email_workflow.action = "schedule"
+                if schedule_due:
+                    context.email_workflow.when = schedule_due.isoformat()
+                    context.email_workflow.timezone = context.email_workflow.timezone or config.EMAIL_TIMEZONE
+                    context.email_workflow.resolved_when = schedule_due.isoformat()
+                    if context.email_workflow.awaiting == "time":
+                        context.email_workflow.awaiting = None
+                elif schedule_error:
+                    context.email_workflow.when = None
+                    context.email_workflow.resolved_when = None
+                    if context.email_workflow.awaiting not in ("recipient", "purpose"):
+                        context.email_workflow.awaiting = "time"
         if decision.get("done"):
             answer = decision["answer"]
             workflow_questions = {"purpose": "What should the email be about?", "recipient": "What is the complete recipient email address?",
@@ -210,6 +262,8 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
                 clarification = workflow_questions.get(context.email_workflow.awaiting, clarification)
                 return finish(" ".join(part for part in (last_email.message, clarification) if part))
             if context.email_touched:
+                if schedule_error and context.email_workflow.awaiting == "time":
+                    return finish(schedule_error)
                 question = workflow_questions.get(context.email_workflow.awaiting, _clarification(answer))
                 if question:
                     return finish(question)
@@ -236,6 +290,14 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
                     steps.append({"tool": item["tool"], "args": item.get("args", {}), "result": str(value)})
             continue
         name, args = decision["tool"], decision.get("args", {})
+        if schedule_requested and name == "email_prepare" and (schedule_due is not None or schedule_error is not None):
+            args = dict(args)
+            args["action"] = "schedule"
+            args["when"] = schedule_due.isoformat() if schedule_due else None
+        if schedule_requested and name in ("email_draft", "email_recipients") and schedule_error:
+            context.email_workflow.action = "schedule"
+            context.email_workflow.when = None
+            context.email_workflow.resolved_when = None
         if name == "handoff_email":
             if context.agent_id != "general" or context.handed_off or not isinstance(args.get("instruction"), str) or not isinstance(args.get("context", ""), str):
                 steps.append({"tool": name, "args": {}, "result": "Error: invalid or repeated handoff"})
@@ -260,6 +322,8 @@ def run_agent(user_input: str, conversation_history: list[str], llm: Any, contex
                     return finish(value.message)
                 continue
             last_email = value
+            if schedule_error and context.email_workflow.awaiting == "time":
+                value.message = schedule_error + " " + value.message
             if value.confirmation_id is not None or value.status in ("error", "needs_details") or isinstance(value.data, dict) and value.data.get("workflow_complete"):
                 return finish(value.message)
     if last_email:

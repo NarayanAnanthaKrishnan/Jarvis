@@ -31,6 +31,7 @@ Use null for an unknown time or timezone; preserve a known time until the user c
 If resolved_when is supplied in the pending workflow, keep when unchanged unless the user changes
 the requested time. The application has already anchored that relative time to the original request.
 Set awaiting to purpose, recipient, time or details when asking a question, otherwise null.
+The application handles recipient-address confirmation before requesting another model decision.
 
 For recipient-only changes call email_recipients with the active draft ID. Use mode=add to fill
 missing recipients while preserving known addresses; use replace only for a requested replacement.

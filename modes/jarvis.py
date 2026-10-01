@@ -10,6 +10,7 @@ from email_agent.models import EmailError
 from email_agent.service import confirmation_number
 from email_agent.workflow import EmailWorkflow
 from ops.tracer import trace
+from tts.text import speech_safe_text
 
 
 class JarvisMode:
@@ -217,6 +218,7 @@ class JarvisMode:
         cancelled = cancelled or self._cancelled
         if not self.session_active or cancelled.is_set() or cancelled is not self._cancelled:
             return
+        text = speech_safe_text(text)
         if STREAMING_ENABLED:
             self.streaming_speaker.speak_stream(iter([text]), cancelled)
         else:
