@@ -2,6 +2,8 @@ import re
 
 
 _ADDRESS = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$")
+_SPOKEN_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9]*(?:[ '-][A-Za-z0-9]+)*$")
+_NON_NAMES = frozenset({"yes", "yeah", "yep", "no", "nope", "okay", "ok", "email", "address", "recipient", "gmail", "mail", "please", "them", "it"})
 _AT_PHRASE = re.compile(r"\b(?:at\s+the\s+rate|at\s+rate|at\s+sign|at\s+symbol|add\s+the|ad\s+the|at|ad|add)(?=\s|$)", re.I)
 _DOMAIN_ALIASES = (
     (re.compile(r"\b(?:g\s*mail|gee\s*mail|gemail|regmail|red\s+gmail)\b", re.I), "gmail"),
@@ -31,7 +33,14 @@ def normalize_spoken_address(value: str) -> tuple[str, bool] | None:
     candidate = re.sub(r"(?<=@)(?:red|ad|add)\s*(?=(?:gmail|outlook))", "", candidate, flags=re.I)
     candidate = candidate.replace(" ", "")
     if not _ADDRESS.fullmatch(candidate):
-        return None
+        name = re.sub(r"^(?:the name is|their name is|name is|to|for)\s+", "", original, flags=re.I).strip()
+        if not _SPOKEN_NAME.fullmatch(name) or name.lower() in _NON_NAMES:
+            return None
+        username = re.sub(r"[ '-]+", ".", name).lower().strip(".")
+        candidate = f"{username}@gmail.com"
+        if not _ADDRESS.fullmatch(candidate):
+            return None
+        return candidate, True
     return candidate, candidate != original
 
 
