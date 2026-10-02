@@ -317,7 +317,7 @@ class LLMClient:
 
         return None
 
-    def _call_email(self, messages: list[dict], response_schema: dict | None) -> dict:
+    def _call_email(self, messages: list[dict], response_schema: dict | None, agent_id: str = "email") -> dict:
         from google.genai import types
 
         profile = EmailModelProfile(config.EMAIL_MODEL, config.EMAIL_THINKING_LEVEL,
@@ -359,17 +359,17 @@ class LLMClient:
                 message = "The email model timed out. Please retry the request."
             else:
                 message = "The email model could not complete the request. Check the connection and model configuration."
-            trace("error", where="email_model", model=profile.model, error_type=type(exc).__name__)
+            trace("error", where=f"{agent_id}_model", model=profile.model, error_type=type(exc).__name__)
             raise ModelRequestError(message) from exc
         finally:
-            trace("model_call", agent_id="email", model=profile.model, status=status, elapsed_s=round(time.monotonic() - started, 3))
+            trace("model_call", agent_id=agent_id, model=profile.model, status=status, elapsed_s=round(time.monotonic() - started, 3))
 
     def call_raw(self, messages: list[dict], tools: list | None = None, temp: float = 0.3, max_tokens: int = 1000,
                  *, profile: str = "general", response_schema: dict | None = None) -> dict | None:
-        if profile == "email":
+        if profile in {"email", "calendar", "mixed"}:
             if tools:
-                raise ValueError("Email decisions use structured output rather than SDK tool execution")
-            return self._call_email(messages, response_schema)
+                raise ValueError("Workspace actions use structured output rather than SDK tool execution")
+            return self._call_email(messages, response_schema, profile)
         if profile != "general" or response_schema is not None:
             raise ValueError("Unsupported model profile or response schema")
         started = time.monotonic()

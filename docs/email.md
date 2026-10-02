@@ -4,7 +4,7 @@ Run these commands from `D:\Jarvis` after activating `jarvis-env`. Use the same 
 
 ## 1. Create the Google OAuth client
 
-1. Create or select a Google Cloud project and enable the Gmail API.
+1. Create or select a Google Cloud project and enable both the Gmail API and Google Calendar API.
 2. Configure Google Auth Platform branding and audience. For a personal Gmail account, use External and add your Gmail address as a test user while the app is in Testing.
 3. Create an OAuth client of type **Desktop app** and download its JSON file to `D:\Jarvis\gmail_client.json`.
 
@@ -28,7 +28,7 @@ python -m email_agent connect
 
 Select the intended account in the browser and approve the requested Gmail access. Connection uses a temporary loopback callback with PKCE. Access and refresh credentials are saved under `Jarvis.Gmail` in Windows Credential Manager. No `token.json` is created. The Gmail address printed on completion is the sending account.
 
-After connection, set `EMAIL_ENABLED=true` in `.env`. Restart Jarvis to reload configuration.
+The OAuth request includes `https://www.googleapis.com/auth/gmail.compose` and `https://www.googleapis.com/auth/calendar.events.owned`. The Calendar scope lets Jarvis create and manage events on calendars you own. Existing Gmail-only saved credentials do not include this grant; run `python -m email_agent connect` again and approve access. After connection, set `EMAIL_ENABLED=true` in `.env`. Restart Jarvis to reload configuration.
 
 ## 3. Install the scheduling worker
 
@@ -99,10 +99,10 @@ This command reads local status without contacting Gmail. State is persisted in 
 | `sent` | Gmail accepted the message, or the user manually resolved an unknown delivery as sent; this is not proof of recipient receipt |
 | `cancelled` / `expired` | No pending delivery for this action; the draft is retained |
 | `missed` | More than 60 seconds overdue; request a new schedule |
-| `needs_review` / `failed` | Connection, account or draft needs attention; check details before requesting a new preview |
-| `delivery_unknown` | Gmail may have accepted a request whose response was lost; no automatic send retry |
+| `delivery_unknown` | Gmail or Calendar may have accepted a write whose response was lost, or Jarvis stopped during the write; inspect the provider before retrying |
+| `needs_review` | A Gmail connection/draft needs attention, or a Calendar event changed outside Jarvis; inspect the provider before requesting a fresh preview |
 
-For `delivery_unknown`, inspect Gmail Sent manually. Only after checking the outcome, record it with one of:
+For an email job in `delivery_unknown`, inspect Gmail Sent manually. Only after checking the outcome, record it with one of:
 
 ```powershell
 python -m email_agent resolve-delivery --job-id 2 --outcome sent
@@ -110,6 +110,8 @@ python -m email_agent resolve-delivery --job-id 2 --outcome not-sent
 ```
 
 Choose the command matching what you found. Neither command sends email. `not-sent` requires that the original draft still exists; request a fresh preview to try again. The voice agent cannot resolve unknown delivery itself.
+
+For an uncertain Calendar action, inspect the primary Google Calendar and `python -m email_agent status`. Jarvis does not retry or resolve that action automatically. If Google shows the event in its requested final state, no further change is needed. If the result is unclear, contact the administrator before creating another event; event IDs and action status are retained for reconciliation.
 
 A draft in `creating`, `editing` or `write_unknown` after interruption is held for manual inspection. Check Gmail for the result before making a new draft. There is no automatic draft import or reconciliation in version one.
 
@@ -122,9 +124,32 @@ python -m email_agent remove-worker
 
 Disconnect revokes the OAuth credential and clears Windows Credential Manager. If revocation fails, the command reports failure and pending jobs remain paused; reconnect or retry once the connection is restored.
 
+## Google Calendar meetings
+
+Email delivery scheduling and meeting scheduling are separate operations. “Schedule an email” queues a saved Gmail draft for later delivery. “Schedule a meeting” prepares a future event on the primary Google Calendar. A guest invitation is sent when the event is approved, even if the meeting itself is in the future.
+
+Examples:
+
+| Say | Result |
+|---|---|
+| “Schedule a meeting with Alex about the project review tomorrow at 3 PM, alex@example.com” | Shows a complete event preview and a meeting action number |
+| “Schedule a meeting with Alex” | Infers a title and asks for the missing date/time or full attendee address |
+| “List my calendar this week” | Lists up to 20 events; Jarvis labels events it manages with their local meeting ID |
+| “Move Jarvis meeting one to Friday at 2 PM” | Shows the changed event and requests a new meeting confirmation |
+| “Cancel Jarvis meeting one” | Shows a cancellation preview and requests its own confirmation |
+| “Confirm meeting two” | Approves only displayed meeting action 2 in this voice session |
+
+The default meeting duration is 30 minutes and the timezone is `EMAIL_TIMEZONE` (default `America/New_York`). Supply another IANA name, such as `Europe/London`, when needed. The date/time must resolve to one unambiguous future instant. If the spoken attendee address may have been normalized from speech, Jarvis reads it back and waits for “yes” before using it. Jarvis never searches contacts or guesses an attendee address.
+
+Every create, change and cancellation prints a full terminal preview and requires the separate exact phrase **“Confirm meeting [action number].”** General “yes” does not approve it. Previews expire after ten minutes or when the session ends. The approval authorizes one operation only; guest invitations are sent by Google after the approved event change.
+
+Jarvis can change or cancel only events it created and tracks by local meeting ID. Events created elsewhere can be listed but not modified by this version. The first version uses the primary calendar, supports one-off events, does not create Google Meet links and does not perform contact lookup or recurring-event management. Calendar write failures with an uncertain Google response are reconciled by the stable event ID; when the outcome remains uncertain, check Google Calendar before asking Jarvis to try again.
+
+Calendar action state and Jarvis-managed event metadata share `email_jobs.db`; event titles, descriptions, attendees and local IDs are stored in its SQLite database. `python -m email_agent status` reports counts/statuses without printing event contents.
+
 ## Optional Jev routing
 
-Jev uses TypeSafe's `Choice` for agent selection and `Noul` for memory retrieval in one request. These are typed classification primitives supported by the [TypeSafe API](https://docs.typesafe.ai/introduction). Email planning and composition use the dedicated Gemini email model after routing or handoff.
+Jev uses TypeSafe's `Choice` for agent selection and `Noul` for memory retrieval in one request. These are typed classification primitives supported by the [TypeSafe API](https://docs.typesafe.ai/introduction). Email planning/composition, Calendar event work and explicit combined requests use dedicated structured action profiles after routing or handoff.
 
 Add a TypeSafe API key to `.env`, then enable routing after evaluating it with your typical requests:
 
@@ -134,13 +159,13 @@ JEV_MODEL=jev-latest
 JEV_ROUTING_ENABLED=true
 ```
 
-Restart Jarvis. Routing calls have a two-second timeout and no retries. Direct Jev email routing requires confidence of at least 0.8. Mixed or unclear requests and low confidence use the general agent; it can gather context and hand off once. When Jev is disabled, missing its key or unavailable, clear email requests and pending address/time replies use a local route to the email specialist. Routine email turns skip the separate memory classifier; requests involving remembered background can still retrieve memory.
+Restart Jarvis. Routing calls have a two-second timeout and no retries. Direct Jev routing to email, Calendar or mixed work requires confidence of at least 0.8. Unclear requests and low confidence use the general agent; it can gather context and hand off once. When Jev is disabled, missing its key or unavailable, clear email/meeting requests and pending workflow replies use local routing. Routine workspace turns skip the separate memory classifier; requests involving remembered background can still retrieve memory.
 
 Check `.traces/events.jsonl` route events using representative requests: general questions, direct email requests, draft follow-ups, research followed by email, and ambiguous instructions. Compare observed routes, fallback counts and latency before relying on direct routing. Automated tests verify the SDK wire format and fallback behavior; live routing accuracy requires your TypeSafe account and representative inputs. Set `JEV_ROUTING_ENABLED=false` to disable it.
 
 ## Data and diagnostics
 
-- Email requires `GEMINI_API_KEY`. The default is `EMAIL_MODEL=gemini-3.8-flash`, with `EMAIL_THINKING_LEVEL=low`; medium and high are configurable. Structured decisions and drafts are validated locally before execution. Calls have a 20-second timeout and 4,096-token output ceiling, with no automatic model fallback or transport retry. This profile is independent of the general assistant's model and its API usage is billed by Gemini.
+- Workspace planning and email writing require `GEMINI_API_KEY`. The default is `EMAIL_MODEL=gemini-3.8-flash`, with `EMAIL_THINKING_LEVEL=low`; medium and high are configurable. Structured decisions and drafts are validated locally before execution. Calls have a 20-second timeout and 4,096-token output ceiling, with no automatic model fallback or transport retry. This profile is independent of the general assistant's model and its API usage is billed by Gemini.
 - Invalid tool arguments receive one correction attempt within the shared step budget. Unexpected failures log the operation stage, exception type, argument names/types and traceback locations in `.logs/jarvis.log`, without argument values or raw provider responses.
 - Invalid or truncated model decisions receive one repair attempt before tools execute. Decision traces include the turn, agent, attempt number, output length and provider finish reason, excluding response contents. Failed interpretation never claims that an email action succeeded.
 - OAuth credentials stay in Windows Credential Manager. Keep `.env` and the Desktop OAuth client JSON out of version control.

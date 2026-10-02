@@ -1,11 +1,11 @@
 # Jarvis — AI Agent Reference
 
-## Implementation update — Gmail and Jev
+## Implementation update — Gmail, Calendar and Jev
 
 This section supersedes the historical implementation descriptions below. See `README.md` and `docs/email.md` for current setup and operation.
 
-- Email decisions and writing use the immutable `call_raw(profile="email", response_schema=...)` request profile: Gemini 3.8 Flash, low reasoning, 20-second timeout, 4,096-token ceiling and no transport retry/model fallback. General model settings remain independent.
-- `email_agent/contracts.py` supplies canonical tool descriptions, JSON schemas and pre-dispatch validation. Invalid arguments get one correction within the existing budget. Never log email argument values or exception messages that may contain provider payloads.
+- Email and Calendar decisions use immutable structured action profiles (`email`, `calendar`, `mixed`) on the dedicated Gemini 3.8 Flash model: low reasoning, 20-second timeout, 4,096-token ceiling and no transport retry/model fallback. General model settings remain independent.
+- `email_agent/contracts.py` and `calendar_agent/contracts.py` supply canonical tool descriptions, JSON schemas and pre-dispatch validation. Invalid arguments get one correction within the existing budget. Never log email/meeting argument values or exception messages that may contain provider payloads.
 - Local TTS defaults to full-precision Kokoro with an int8 fallback, background preloading, two queued chunks and one continuous output stream per response. Cancellation aborts playback and discards stale synthesis; the microphone resumes only after output drains. `ops/speech_check.py` benchmarks with Whisper loaded.
 - Hotkey callbacks only submit commands to `modes/controller.py` and return. They fire on release; recorder initialization, transcription, shutdown and session summarization must never run inside the keyboard hook.
 - Recorder loading can be cancelled before activation. Session turns run separately from the recorder control loop, and late callbacks retain their original cancellation identity. RealtimeSTT `abort()` is not used because it can wait indefinitely without an active transcription waiter.
@@ -15,15 +15,15 @@ This section supersedes the historical implementation descriptions below. See `R
 - `stt/recorder_runtime.py` supervises the pinned recorder's initialization and releases its readiness wait on cancellation, worker exit or a 60-second timeout, then cleans up partial resources.
 
 - STT currently uses CPU, `tiny` for Jarvis sessions and `base` for dictation; this configuration is intentionally retained.
-- `agent/context.py` holds cancellation, session identity, draft state and one shared six-step budget. `agent/specs.py` defines general/email tool permissions. One general-to-email handoff is allowed per turn.
-- `agent/router.py` uses the official TypeSafe SDK with Choice and Noul. Jev routing is optional, disabled by default, with a two-second timeout and conservative fallback.
-- `email_agent/` implements Gmail Desktop OAuth, Windows Credential Manager storage, plain text drafts, separate voice approvals, SQLite scheduling, delivery recovery and a CLI. The worker has no STT/TTS/LLM dependencies at startup.
-- Send and schedule require a complete terminal preview and a later exact `Confirm email <action ID>` utterance. Approval is enforced outside model tools and expires with the session or after ten minutes.
+- `agent/context.py` holds cancellation, session identity, email and Calendar workflow state and one shared six-step budget. `agent/specs.py` defines general/email/Calendar/mixed tool permissions. One handoff from the general agent is allowed per turn.
+- `agent/router.py` uses the official TypeSafe SDK with Choice and Noul. Jev routing is optional, disabled by default, with a two-second timeout and conservative fallback; local routing handles explicit workspace requests and active follow-ups.
+- `email_agent/` implements Gmail Desktop OAuth, Windows Credential Manager storage, plain text drafts, SQLite delivery scheduling/recovery and a CLI. `calendar_agent/` implements primary-calendar event previews, approvals, managed-event tracking and uncertain-write recovery. Both use the same additive SQLite database and Google OAuth account. The email worker has no STT/TTS/LLM dependencies at startup.
+- Email send/schedule and Calendar create/update/cancel require complete terminal previews and separate exact `Confirm email <action ID>` or `Confirm meeting <action ID>` utterances. Approval is enforced outside model tools and expires with the session or after ten minutes. Calendar guest invitations are sent after approval.
 - The local worker polls every five seconds; jobs beyond a 60-second delivery window become missed. Unknown delivery outcomes are never automatically retried. Revisions and approved snapshots are checked before sending.
 - `tts/playback.py` owns shared synchronous, cancellable audio. The microphone remains paused until playback completes. Both modes share one recorder with explicit ownership and shutdown.
-- `modes/jarvis.py` owns conversation history and saves it once. Email turns are excluded from automatic extraction and session summaries.
+- `modes/jarvis.py` owns conversation history and saves it once. Email and Calendar turns are excluded from automatic extraction and session summaries.
 - `ops/tracer.py` records metadata to rotating files; `ops/logging_setup.py` bounds new application logs. Historical logs are retained.
-- `tests/` exercises email workflow, confirmations, scheduler recovery, routing/tool permissions, SDK contracts, audio cancellation and session lifecycle using fakes. Gmail/Jev credentials and an interactive Windows session are required for live acceptance checks.
+- `tests/` exercises email and Calendar workflows, confirmations, scheduler recovery, routing/tool permissions, SDK contracts, audio cancellation and session lifecycle using fakes. Gmail/Calendar/Jev credentials and an interactive Windows session are required for live acceptance checks.
 
 ## Project Overview (historical reference)
 - **What:** Personal AI assistant — press hotkey, speak, get spoken response

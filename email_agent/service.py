@@ -15,8 +15,10 @@ from email_agent.timing import parse_send_time
 from ops.tracer import trace
 
 
-def confirmation_number(text: str) -> int | None:
-    match = re.fullmatch(r"confirm email ([a-z0-9 -]+)[.!?]?", text.strip().lower())
+def confirmation_number(text: str, action: str = "email") -> int | None:
+    if action not in {"email", "meeting"}:
+        return None
+    match = re.fullmatch(rf"confirm {action} ([a-z0-9 -]+)[.!?]?", text.strip().lower())
     if not match:
         return None
     value = match[1].strip()

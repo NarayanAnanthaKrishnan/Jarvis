@@ -8,6 +8,7 @@ import pyperclip
 from agent.context import TurnContext
 from email_agent.models import EmailError, EmailResult
 from email_agent.contracts import safe_key
+from calendar_agent.contracts import TOOL_SCHEMAS as CALENDAR_TOOL_SCHEMAS
 from llm.client import ModelRequestError
 from llm.prompts import ULTRA_SYSTEM_PROMPT
 from tools.web_search import search_web, fetch_url
@@ -105,15 +106,23 @@ TOOL_MAP = {
 }
 
 
-READ_ONLY_TOOLS = frozenset({"search_web", "fetch_url", "get_city_info", "get_weather", "get_datetime", "calculate", "read_notes", "get_system_info", "read_clipboard", "get_news", "list_reminders", "read_screen", "email_get", "email_list"})
+READ_ONLY_TOOLS = frozenset({"search_web", "fetch_url", "get_city_info", "get_weather", "get_datetime", "calculate", "read_notes", "get_system_info", "read_clipboard", "get_news", "list_reminders", "read_screen", "email_get", "email_list", "calendar_list"})
 EMAIL_TOOLS = frozenset({"email_draft", "email_get", "email_recipients", "email_prepare", "email_list", "email_cancel"})
-GENERAL_TOOLS = frozenset(TOOL_MAP) | {"handoff_email"}
+CALENDAR_TOOLS = frozenset(CALENDAR_TOOL_SCHEMAS)
+GENERAL_TOOLS = frozenset(TOOL_MAP) | {"handoff_email", "handoff_calendar"}
 
 
 def execute_tool(name: str, args: dict, llm=None, context: TurnContext | None = None, parallel: bool = False) -> str | EmailResult:
     if not isinstance(args, dict) or not isinstance(name, str):
         return "Error: Tool name and arguments have invalid types"
-    allowed = EMAIL_TOOLS | {"get_datetime"} if context and context.agent_id == "email" else GENERAL_TOOLS
+    if context and context.agent_id == "email":
+        allowed = EMAIL_TOOLS | {"get_datetime"}
+    elif context and context.agent_id == "calendar":
+        allowed = CALENDAR_TOOLS | {"get_datetime"}
+    elif context and context.agent_id == "mixed":
+        allowed = EMAIL_TOOLS | CALENDAR_TOOLS | {"get_datetime"}
+    else:
+        allowed = GENERAL_TOOLS
     if name not in allowed:
         return "Error: Tool is not available to this agent"
     if parallel and name not in READ_ONLY_TOOLS:
@@ -145,6 +154,31 @@ def execute_tool(name: str, args: dict, llm=None, context: TurnContext | None = 
                 {safe_key(key): type(value).__name__ for key, value in args.items()},
                 [(frame.filename, frame.lineno, frame.name) for frame in traceback.extract_tb(exc.__traceback__)])
             return EmailResult("error", f"Email operation could not complete ({type(exc).__name__}). Check email status before retrying.")
+    if name in CALENDAR_TOOLS:
+        if context is None:
+            return "Error: Calendar requires an active session"
+        context.calendar_touched = True
+        try:
+            from calendar_agent.runtime import execute_calendar
+            key = json.dumps([name, args], sort_keys=True, ensure_ascii=False)
+            if name not in READ_ONLY_TOOLS and key in context.mutation_results:
+                return context.mutation_results[key]
+            result = execute_calendar(name, args, context)
+            if name not in READ_ONLY_TOOLS and result.status != "invalid_arguments":
+                context.mutation_results[key] = result
+            return result
+        except InterruptedError:
+            raise
+        except EmailError as exc:
+            from calendar_agent.models import CalendarResult
+            return CalendarResult("error", str(exc))
+        except Exception as exc:
+            logging.getLogger("jarvis.calendar").error("Calendar failure: turn=%s operation=%s type=%s argument_types=%s frames=%s",
+                context.turn_id, name, type(exc).__name__,
+                {safe_key(key): type(value).__name__ for key, value in args.items()},
+                [(frame.filename, frame.lineno, frame.name) for frame in traceback.extract_tb(exc.__traceback__)])
+            from calendar_agent.models import CalendarResult
+            return CalendarResult("error", f"Calendar operation could not complete ({type(exc).__name__}). Check meeting status before retrying.")
     fn = TOOL_MAP.get(name)
     if fn is None:
         return f"Error: Unknown tool '{name}'"

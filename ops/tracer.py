@@ -12,7 +12,7 @@ from config import TRACING
 TRACE_DIR = Path(__file__).resolve().parent.parent / ".traces"
 _LOCK = threading.Lock()
 _HANDLER: RotatingFileHandler | None = None
-_FIELDS = frozenset({"turn_id", "step", "steps", "agent_id", "confidence", "source", "fallback_reason", "model", "elapsed_s", "needs_memory", "name", "status", "where", "error_type", "error_code", "draft_id", "job_id", "attempt", "output_chars", "finish_reason", "time_present", "time_parse", "time_source"})
+_FIELDS = frozenset({"turn_id", "step", "steps", "agent_id", "confidence", "source", "fallback_reason", "model", "elapsed_s", "needs_memory", "name", "status", "where", "error_type", "error_code", "draft_id", "job_id", "action_id", "managed_id", "attempt", "output_chars", "finish_reason", "time_present", "time_parse", "time_source", "time_error_code"})
 
 
 def trace(event: str, **data: Any) -> None:

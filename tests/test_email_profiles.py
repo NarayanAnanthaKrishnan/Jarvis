@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -61,3 +62,31 @@ def test_email_decisions_request_email_profile(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(loop, "load_profile", lambda: "")
     loop.think("schedule", [], [], llm, context=TurnContext(agent_id="email"))
     assert llm.call_raw.call_args.kwargs == {"profile": "email", "response_schema": DECISION_SCHEMA}
+
+
+@pytest.mark.parametrize("agent, profile", [("calendar", "calendar"), ("mixed", "mixed")])
+def test_calendar_profiles_request_structured_action_schema(agent: str, profile: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent.context import TurnContext
+    from agent import loop
+
+    llm = Mock()
+    decision = {"done": True, "answer": "When should the meeting start?", "calendar_workflow": {
+        "action": "create", "title": "Review", "when": None, "timezone": None, "duration_minutes": 30,
+        "attendees": [], "description": "", "location": "", "awaiting": "time", "event_id": None}}
+    if agent == "mixed":
+        decision["email_workflow"] = {"action": "draft", "when": None, "timezone": None, "awaiting": None, "new_draft": False}
+    llm.call_raw.return_value = {"message": {"content": json.dumps(decision)}}
+    monkeypatch.setattr(loop, "load_profile", lambda: "")
+    loop.think("schedule a meeting", [], [], llm, context=TurnContext(agent_id=agent))
+    kwargs = llm.call_raw.call_args.kwargs
+    assert kwargs["profile"] == profile
+    assert "anyOf" in kwargs["response_schema"]
+
+
+def test_email_and_meeting_confirmation_phrases_are_distinct() -> None:
+    from email_agent.service import confirmation_number
+
+    assert confirmation_number("Confirm email two") == 2
+    assert confirmation_number("Confirm meeting twenty one", "meeting") == 21
+    assert confirmation_number("Confirm meeting two") is None
+    assert confirmation_number("Confirm email two", "meeting") is None

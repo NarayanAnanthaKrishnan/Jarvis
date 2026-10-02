@@ -9,6 +9,7 @@ from config import STREAMING_ENABLED, AUTO_EXTRACT, TTS_PRELOAD
 from email_agent.models import EmailError
 from email_agent.service import confirmation_number
 from email_agent.workflow import EmailWorkflow
+from calendar_agent.workflow import CalendarWorkflow
 from ops.tracer import trace
 from tts.text import speech_safe_text
 
@@ -28,7 +29,9 @@ class JarvisMode:
         self._cancelled = threading.Event()
         self._active_draft_id: int | None = None
         self._email_service: Any = None
+        self._calendar_service: Any = None
         self._email_workflow = EmailWorkflow()
+        self._calendar_workflow = CalendarWorkflow()
         self._saved = False
         self._save_threads: list[threading.Thread] = []
         self._turn_thread: threading.Thread | None = None
@@ -55,6 +58,8 @@ class JarvisMode:
             cancelled = self._cancelled
             self._active_draft_id = None
             self._email_workflow = EmailWorkflow()
+            self._calendar_workflow = CalendarWorkflow()
+            self._calendar_service = None
             self._turn_lock = threading.Lock()
             self.session_active = True
         try:
@@ -109,9 +114,14 @@ class JarvisMode:
                 self._email_service = None
                 self._active_draft_id = None
                 self._email_workflow = EmailWorkflow()
+            if self._calendar_service and not self._calendar_service.provider.connection_current():
+                self._calendar_service = None
+                self._calendar_workflow = CalendarWorkflow()
             context = TurnContext(session_id=session_id, cancelled=cancelled,
                                   active_draft_id=self._active_draft_id, email_service=self._email_service,
-                                  email_workflow=EmailWorkflow(**self._email_workflow.snapshot()))
+                                  email_workflow=EmailWorkflow(**self._email_workflow.snapshot()),
+                                  calendar_service=self._calendar_service,
+                                  calendar_workflow=CalendarWorkflow(**self._calendar_workflow.snapshot()))
             if context.cancelled.is_set():
                 return
             self.stream_stt.pause()
@@ -123,6 +133,8 @@ class JarvisMode:
                     self._save_session()
                     if self._email_service:
                         self._email_service.end_session(self._session_id)
+                    if self._calendar_service:
+                        self._calendar_service.end_session(self._session_id)
                     with self._lock:
                         context.check_active()
                         self._history = []
@@ -130,31 +142,51 @@ class JarvisMode:
                         self._active_draft_id = None
                         context.active_draft_id = None
                         context.email_workflow = EmailWorkflow()
+                        context.calendar_workflow = CalendarWorkflow()
                         self._email_workflow = EmailWorkflow()
+                        self._calendar_workflow = CalendarWorkflow()
                         self._session_id = uuid.uuid4().hex
                         context.session_id = self._session_id
                         self._saved = False
                     reply = "Started a fresh session."
                     self._speak(reply, context.cancelled)
                     return
-                number = confirmation_number(text)
-                if number is not None or normalized.startswith("confirm email"):
+                email_number = confirmation_number(text)
+                meeting_number = confirmation_number(text, "meeting")
+                if email_number is not None or meeting_number is not None or normalized.startswith(("confirm email", "confirm meeting")):
                     context.email_touched = True
-                    if number is None or self._email_service is None:
+                    context.calendar_touched = meeting_number is not None or normalized.startswith("confirm meeting")
+                    if email_number is not None and self._email_service is None:
                         reply = "Request an email preview first, then say confirm email followed by its action number."
-                    else:
-                        result = self._email_service.confirm(number, context.session_id, context.cancelled)
+                    elif normalized.startswith("confirm meeting") and meeting_number is None:
+                        reply = "Say confirm meeting followed by the action number shown in its preview."
+                    elif meeting_number is not None and context.calendar_service is None:
+                        reply = "Request a meeting preview first, then say confirm meeting followed by its action number."
+                    elif email_number is not None:
+                        result = self._email_service.confirm(email_number, context.session_id, context.cancelled)
                         reply = result.message
                         context.email_workflow = EmailWorkflow()
+                    else:
+                        result = context.calendar_service.confirm(meeting_number, context.session_id, context.cancelled)
+                        reply = result.message
+                        context.calendar_workflow = CalendarWorkflow()
                     context.check_active()
                     self._speak(reply, context.cancelled)
                 else:
                     result = run_agent(text, self._conversation_history, self.llm, context)
                     context.check_active()
-                    if result.get("preview"):
-                        print(f"\n{result['preview']}\n")
-                    if result.get("confirmation_id") is not None:
-                        context.email_service.mark_presented(result["confirmation_id"], context.session_id)
+                    for preview in result.get("previews", []):
+                        print(f"\n{preview['text']}\n")
+                        if preview["kind"] == "email":
+                            context.email_service.mark_presented(preview["id"], context.session_id)
+                        else:
+                            context.calendar_service.mark_presented(preview["id"], context.session_id)
+                            context.calendar_workflow = CalendarWorkflow()
+                    if not result.get("previews"):
+                        if result.get("preview"):
+                            print(f"\n{result['preview']}\n")
+                        if result.get("confirmation_id") is not None:
+                            context.email_service.mark_presented(result["confirmation_id"], context.session_id)
                     reply = result["output"]
                     if result.get("stream") is not None:
                         if STREAMING_ENABLED:
@@ -167,7 +199,7 @@ class JarvisMode:
                         if result.get("delivery", "speak") in ("speak", "both") and reply:
                             self._speak(reply, context.cancelled)
                         context.check_active()
-                        if result.get("delivery") in ("paste", "both") and reply and not context.email_touched:
+                        if result.get("delivery") in ("paste", "both") and reply and not (context.email_touched or context.calendar_touched):
                             from tools.registry import execute_tool
                             execute_tool("paste_at_cursor", {"text": reply}, context=context)
                 context.check_active()
@@ -181,8 +213,8 @@ class JarvisMode:
                 trace("error", where="jarvis_turn", error_type=type(exc).__name__)
                 if context.cancelled.is_set():
                     return
-                if context.email_touched:
-                    reply = "The email request could not complete. Check email status before retrying."
+                if context.email_touched or context.calendar_touched:
+                    reply = "The Workspace action could not complete. Check the action status before retrying."
                 else:
                     try:
                         messages = [{"role": "system", "content": "Answer the user briefly. You have no tools in this fallback; do not claim actions were performed."}]
@@ -198,13 +230,16 @@ class JarvisMode:
                 with self._lock:
                     if not context.cancelled.is_set() and self.session_active and context.session_id == self._session_id:
                         self._email_service = context.email_service
+                        self._calendar_service = context.calendar_service
                         self._active_draft_id = context.active_draft_id
                         self._email_workflow = context.email_workflow
+                        self._calendar_workflow = context.calendar_workflow
                         self.stream_stt.resume()
             if reply and not context.cancelled.is_set():
                 print(f"🤖 Jarvis: {reply}")
-                self._append(text, reply, context.email_touched, context.session_id)
-                if AUTO_EXTRACT and not context.email_touched:
+                connector_touched = context.email_touched or context.calendar_touched
+                self._append(text, reply, connector_touched, context.session_id)
+                if AUTO_EXTRACT and not connector_touched:
                     from memory.extractor import extract_and_store
                     threading.Thread(target=extract_and_store, args=(text, self.llm), daemon=True).start()
 
@@ -270,6 +305,8 @@ class JarvisMode:
         self.stream_stt.stop_session()
         if self._email_service:
             self._email_service.end_session(self._session_id)
+        if self._calendar_service:
+            self._calendar_service.end_session(self._session_id)
         self._save_session()
         print("🗣 Session ended.")
 

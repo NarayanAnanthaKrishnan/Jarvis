@@ -1,6 +1,6 @@
 # Jarvis — Personal AI Assistant
 
-Windows voice assistant with a general agent, a Gmail specialist, and optional Jev routing. Uses cloud LLMs through Gemini, OpenAI or Anthropic. Python 3.12.
+Windows voice assistant with general, Gmail and Google Calendar specialists, plus optional Jev routing. Uses cloud LLMs through Gemini, OpenAI or Anthropic. Python 3.12.
 
 ## Setup
 
@@ -57,23 +57,42 @@ Start with just the purpose: “Schedule an email asking Alex about a software r
 
 Scheduling uses a separate Windows worker and SQLite state. Keep the PC awake, online and logged in. The worker runs without the voice app. Jobs more than 60 seconds overdue become `missed` and require a new time and confirmation.
 
+### Calendar meetings
+
+Calendar setup uses the same Google Desktop OAuth account. Enable both the Gmail and Google Calendar APIs, then reconnect using `python -m email_agent connect` so the account receives the Calendar grant. See [Calendar setup and operation](docs/email.md#google-calendar-meetings).
+
+Supported requests include:
+
+- “Schedule a meeting with Alex about the project review tomorrow at 3 PM, alex@example.com.”
+- “List my calendar this week.”
+- “Move Jarvis meeting one to Friday at 2 PM.”
+- “Cancel Jarvis meeting one.”
+
+Each meeting change shows a full terminal preview and requires its own **“Confirm meeting [action number]”** utterance. Meeting invitations go to guests after approval. Email delivery times and meeting start times are handled as separate actions. Jarvis manages one-off events on the primary calendar, defaults to 30 minutes and `EMAIL_TIMEZONE`, and does not look up contacts or create Meet links.
+
 Version one supports one Gmail account and plain text messages, with To/Cc/Bcc. Inbox search, reply threads, attachments, HTML, aliases and contact lookup are outside this version.
 
 ## Routing and execution
 
 ```mermaid
 flowchart TD
-    U[User utterance] --> C{Exact email confirmation?}
+    U[User utterance] --> C{Exact email or meeting confirmation?}
     C -->|Yes| A[Application validates displayed action and session]
     C -->|No| R[Optional Jev route and memory decision]
     R --> G[General agent]
     R --> E[Email specialist]
+    R --> K[Calendar specialist]
+    R --> M[Mixed specialist]
     G -->|One handoff| E
+    G -->|Meeting handoff| K
+    G -->|Explicit combined request| M
     E --> D[Gmail draft or action preview]
+    K --> V[Calendar event preview]
+    M --> X[Separate Gmail and Calendar previews]
     A --> S[Immediate delivery or persistent schedule]
 ```
 
-Jev classifies intent; the email model writes and plans email work. When Jev is disabled or unavailable, clear email requests and pending address/time replies route directly to the specialist. Mixed requests and other uncertain requests use the general agent, which can gather context and hand off. Both agents share one six-step budget. Malformed decisions get one repair attempt within that budget before any tool execution. Tool permissions are enforced by the dispatcher, and only read operations can run in parallel. Models cannot confirm sends.
+Jev classifies intent; dedicated structured action profiles plan email and Calendar work. When Jev is disabled or unavailable, clear workspace requests and pending workflow replies route locally. Unclear requests use the general agent, which can gather context and hand off once. All specialists share one six-step budget. Malformed decisions get one repair attempt within that budget before tool execution. Tool permissions are enforced by the dispatcher, and only read operations can run in parallel. Models cannot confirm email sends or meeting changes.
 
 ## Development and checks
 

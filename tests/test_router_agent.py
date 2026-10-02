@@ -19,11 +19,11 @@ def test_json_with_braces_and_validation() -> None:
             loop.validate_decision(decision)
 
 
-@pytest.mark.parametrize("choice, confidence, agent", [("email", .95, "email"), ("email", .4, "general"), ("mixed", .95, "general"), ("unclear", .95, "general")])
+@pytest.mark.parametrize("choice, confidence, agent", [("email", .95, "email"), ("email", .4, "general"), ("calendar", .95, "calendar"), ("mixed", .95, "mixed"), ("mixed", .4, "general"), ("unclear", .95, "general")])
 def test_routing_and_context(monkeypatch: pytest.MonkeyPatch, choice: str, confidence: float, agent: str) -> None:
     monkeypatch.setattr(config, "JEV_ROUTING_ENABLED", True)
     client = Mock()
-    probabilities = {key: float(key == choice) for key in ("email", "general", "mixed", "unclear")}
+    probabilities = {key: float(key == choice) for key in ("email", "calendar", "general", "mixed", "unclear")}
     client.system_one.return_value = {"answers": {"route": {"choice": choice, "confidence": confidence, "probabilities": probabilities}, "memory": {"noul": .1}}}
     result = route_turn("make it shorter", ["User: draft an email"], {"active_draft_id": 7}, client)
     assert result.agent_id == agent
@@ -51,6 +51,25 @@ def test_pending_email_followup_takes_precedence_over_jev(monkeypatch: pytest.Mo
     result = route_turn("later today 6pm", [], {"active_draft_id": 7, "action": "schedule", "awaiting": "time"}, client)
     assert result.agent_id == "email"
     assert result.fallback_reason == ""
+    client.system_one.assert_not_called()
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Schedule an email to Alex for later today at 6pm", "email"),
+    ("Schedule a meeting with Alex for later today at 6pm", "calendar"),
+    ("Schedule an email asking Alex about a meeting", "email"),
+    ("Schedule a meeting and an email agenda for later", "mixed"),
+])
+def test_local_workspace_intent_routing(text: str, expected: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "JEV_ROUTING_ENABLED", False)
+    assert route_turn(text, [], {}, Mock()).agent_id == expected
+
+
+def test_calendar_time_followup_takes_precedence_over_jev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config, "JEV_ROUTING_ENABLED", True)
+    client = Mock()
+    state = {"calendar_workflow": {"action": "create", "awaiting": "time"}}
+    assert route_turn("later today 6pm", [], state, client).agent_id == "calendar"
     client.system_one.assert_not_called()
 
 

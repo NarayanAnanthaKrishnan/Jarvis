@@ -12,13 +12,16 @@ class EmailStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.transaction() as conn:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise RuntimeError("Unsupported email database version")
             conn.execute("CREATE TABLE IF NOT EXISTS drafts (id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, remote_id TEXT, payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, operation_key TEXT UNIQUE NOT NULL, updated_at REAL NOT NULL)")
             conn.execute("CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, draft_id INTEGER NOT NULL REFERENCES drafts(id), account TEXT NOT NULL, session_id TEXT NOT NULL, action TEXT NOT NULL, payload TEXT NOT NULL, fingerprint TEXT NOT NULL, revision INTEGER NOT NULL, timezone TEXT NOT NULL, due_at REAL NOT NULL, expires_at REAL NOT NULL, status TEXT NOT NULL, presented INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0, lease_until REAL NOT NULL DEFAULT 0, provider_message_id TEXT, last_error TEXT, updated_at REAL NOT NULL)")
             conn.execute("CREATE INDEX IF NOT EXISTS jobs_due ON jobs(status, due_at, next_attempt)")
             conn.execute("CREATE TABLE IF NOT EXISTS notifications (job_id INTEGER PRIMARY KEY, status TEXT NOT NULL)")
-            conn.execute("PRAGMA user_version=1")
+            conn.execute("CREATE TABLE IF NOT EXISTS calendar_actions (id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, session_id TEXT NOT NULL, action TEXT NOT NULL, managed_id INTEGER, event_id TEXT NOT NULL, payload TEXT NOT NULL, request_key TEXT UNIQUE NOT NULL, expires_at REAL NOT NULL, status TEXT NOT NULL, presented INTEGER NOT NULL DEFAULT 0, error_code TEXT, updated_at REAL NOT NULL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS calendar_actions_status ON calendar_actions(status, updated_at)")
+            conn.execute("CREATE TABLE IF NOT EXISTS calendar_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, event_id TEXT NOT NULL, payload TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL, updated_at REAL NOT NULL, UNIQUE(account,event_id))")
+            conn.execute("PRAGMA user_version=2")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

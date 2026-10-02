@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from config import MAX_STEPS
+from calendar_agent.workflow import CalendarWorkflow
 from email_agent.workflow import EmailWorkflow
 
 
@@ -19,6 +20,9 @@ class TurnContext:
     active_draft_id: int | None = None
     email_service: Any = None
     email_workflow: EmailWorkflow = field(default_factory=EmailWorkflow)
+    calendar_service: Any = None
+    calendar_workflow: CalendarWorkflow = field(default_factory=CalendarWorkflow)
+    calendar_touched: bool = False
     email_stage: str = "dispatch"
     memories: str = "(none)"
     mutation_results: dict[str, Any] = field(default_factory=dict)

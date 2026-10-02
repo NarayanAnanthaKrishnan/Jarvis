@@ -9,7 +9,7 @@ import config
 from email_agent.models import EmailPayload, ProviderError
 
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
+SCOPES = ["https://www.googleapis.com/auth/gmail.compose", "https://www.googleapis.com/auth/calendar.events.owned"]
 KEYRING_SERVICE = "Jarvis.Gmail"
 KEYRING_USER = "primary"
 CONNECTION_FILE = Path(config.EMAIL_DB_PATH).parent / ".gmail_connection.json"
@@ -48,7 +48,10 @@ def load_credentials() -> Any:
     if not raw:
         raise ProviderError("gmail_not_connected")
     try:
-        credentials = Credentials.from_authorized_user_info(json.loads(raw), SCOPES)
+        info = json.loads(raw)
+        if not set(SCOPES).issubset(set(info.get("scopes") or [])):
+            raise ProviderError("google_reconnect_required")
+        credentials = Credentials.from_authorized_user_info(info, SCOPES)
         if not credentials.valid:
             credentials.refresh(partial(Request(), timeout=15))
             save_credentials(credentials)
@@ -117,6 +120,8 @@ def connect(client_file: str | None = None) -> str:
     flow = InstalledAppFlow.from_client_secrets_file(str(path), SCOPES, autogenerate_code_verifier=True)
     credentials = flow.run_local_server(host="127.0.0.1", port=0, access_type="offline", prompt="consent", timeout_seconds=180)
     account = GmailProvider(credentials).account
+    from calendar_agent.google_calendar import GoogleCalendarProvider
+    GoogleCalendarProvider(credentials, account).verify()
     if not credentials.refresh_token:
         raise ProviderError("offline_access_not_granted")
     save_credentials(credentials)

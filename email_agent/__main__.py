@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import config
@@ -35,7 +36,7 @@ Unregister-ScheduledTask -TaskName 'JarvisEmailWorker' -Confirm:$false
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Jarvis Gmail connection and local worker")
+    parser = argparse.ArgumentParser(description="Jarvis Google Workspace email and Calendar connection")
     parser.add_argument("command", choices=["connect", "disconnect", "health", "status", "worker", "install-worker", "remove-worker", "resolve-delivery"])
     parser.add_argument("--client-file")
     parser.add_argument("--job-id", type=int)
@@ -44,18 +45,19 @@ def main() -> int:
     try:
         if args.command == "connect":
             from email_agent.gmail import connect
-            print(f"Connected Gmail account: {connect(args.client_file)}")
+            print(f"Connected Google Workspace account: {connect(args.client_file)}")
             from email_agent.store import EmailStore
             with EmailStore(config.EMAIL_DB_PATH).transaction() as conn:
                 conn.execute("UPDATE jobs SET status='needs_review',last_error='reconnected' WHERE status IN ('awaiting_confirmation','scheduled','checking')")
-            print("Set EMAIL_ENABLED=true in .env, then install the worker.")
+            print("Set EMAIL_ENABLED=true in .env. Install the worker to deliver scheduled Gmail messages.")
         elif args.command == "disconnect":
             from email_agent.gmail import disconnect
             from email_agent.store import EmailStore
             with EmailStore(config.EMAIL_DB_PATH).transaction() as conn:
                 conn.execute("UPDATE jobs SET status='needs_review',last_error='disconnected' WHERE status IN ('awaiting_confirmation','scheduled','checking')")
+                conn.execute("UPDATE calendar_actions SET status='needs_review',error_code='disconnected',updated_at=? WHERE status IN ('awaiting_confirmation','processing')", (time.time(),))
             disconnect()
-            print("Gmail disconnected. Pending emails require a new preview and confirmation.")
+            print("Google Workspace disconnected. Pending email and meeting actions require review.")
         elif args.command in ("install-worker", "remove-worker"):
             if args.command == "install-worker" and not config.EMAIL_ENABLED:
                 raise RuntimeError("Set EMAIL_ENABLED=true before installing the worker")
@@ -70,7 +72,11 @@ def main() -> int:
             from email_agent.store import EmailStore
             with EmailStore(config.EMAIL_DB_PATH).transaction() as conn:
                 rows = conn.execute("SELECT id,draft_id,status,action,due_at,timezone,last_error,provider_message_id FROM jobs ORDER BY id DESC LIMIT 50").fetchall()
-            print(json.dumps([dict(row) for row in rows], indent=2))
+                calendar_actions = conn.execute("SELECT id,managed_id,status,action,error_code,updated_at FROM calendar_actions ORDER BY id DESC LIMIT 50").fetchall()
+                meetings = conn.execute("SELECT id,status,updated_at FROM calendar_events ORDER BY id DESC LIMIT 50").fetchall()
+            print(json.dumps({"email_jobs": [dict(row) for row in rows],
+                              "calendar_actions": [dict(row) for row in calendar_actions],
+                              "managed_meetings": [dict(row) for row in meetings]}, indent=2))
         elif args.command == "resolve-delivery":
             if args.job_id is None or args.outcome is None:
                 raise ValueError("Inspect Gmail Sent first, then specify --job-id and --outcome sent|not-sent")
@@ -78,8 +84,11 @@ def main() -> int:
             print(get_service().resolve_delivery(args.job_id, args.outcome == "sent").message)
         else:
             from email_agent.gmail import GmailProvider
+            from calendar_agent.google_calendar import GoogleCalendarProvider
             print(f"Email enabled: {config.EMAIL_ENABLED}")
-            print(f"Connected account: {GmailProvider().account}")
+            gmail = GmailProvider()
+            GoogleCalendarProvider(gmail.credentials, gmail.account).verify()
+            print(f"Connected Google Workspace account: {gmail.account}")
             path = Path(config.EMAIL_DB_PATH).parent / "email_worker_status.json"
             print(f"Worker heartbeat: {path.read_text(encoding='utf-8') if path.exists() else 'not started'}")
         return 0
